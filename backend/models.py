@@ -38,8 +38,9 @@ class ImageTask(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     prompt = Column(Text, nullable=False)
+    uploaded_image = Column(String(500), nullable=True)
     optimized_prompt = Column(Text, nullable=True)
-    image_url = Column(String(500), nullable=True)
+    result_image_url = Column(String(500), nullable=True)
     status = Column(String(20), default="pending")  # pending / generating / done / failed
     error_msg = Column(Text, nullable=True)
     owner_id = Column(Integer, ForeignKey("users.id"))

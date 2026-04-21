@@ -16,7 +16,8 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err.response?.status === 401) {
+    const isAuthRequest = err.config?.url?.startsWith('/auth/')
+    if (err.response?.status === 401 && !isAuthRequest) {
       localStorage.removeItem('token')
       window.location.hash = '#/login'
     }
@@ -41,7 +42,9 @@ export const modelConfigAPI = {
 
 // Image Generation
 export const imageGenAPI = {
-  generate: (data) => api.post('/image-gen/', data),
+  generate: (formData) => api.post('/image-gen/', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  }),
   list: () => api.get('/image-gen/'),
   get: (id) => api.get(`/image-gen/${id}`),
 }

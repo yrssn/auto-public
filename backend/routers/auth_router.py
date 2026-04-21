@@ -25,7 +25,7 @@ def login(payload: UserCreate, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == payload.username).first()
     if not user or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="用户名或密码错误")
-    token = create_access_token(data={"sub": user.id})
+    token = create_access_token(data={"sub": str(user.id)})
     return {"access_token": token}
 
 

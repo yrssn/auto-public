@@ -69,7 +69,7 @@ async function handleSubmit() {
     } else {
       await authStore.login(form.value.username, form.value.password)
       ElMessage.success('登录成功')
-      router.push('/')
+      await router.replace('/image-gen')
     }
   } catch (err) {
     ElMessage.error(err.response?.data?.detail || '操作失败')
