@@ -52,14 +52,19 @@
               </div>
               <div class="result-output" v-if="task.optimized_prompt || task.result_image_url || task.error_msg">
                 <div class="result-label">AI 输出</div>
-                <p v-if="task.optimized_prompt" class="result-optimized">{{ task.optimized_prompt }}</p>
-                <el-image
-                  v-if="task.result_image_url"
-                  :src="task.result_image_url"
-                  :preview-src-list="[task.result_image_url]"
-                  class="result-thumb-lg"
-                  fit="contain"
-                />
+                <div v-if="task.optimized_prompt" class="result-optimized">
+                  <span class="opt-label">优化提示词：</span>{{ task.optimized_prompt }}
+                </div>
+                <div v-if="task.result_image_url" style="margin-top: 8px">
+                  <span class="opt-label">生成图片：</span>
+                  <el-image
+                    :src="task.result_image_url"
+                    :preview-src-list="[task.result_image_url]"
+                    class="result-thumb-lg"
+                    fit="contain"
+                    style="margin-top: 4px"
+                  />
+                </div>
                 <p v-if="task.error_msg" class="result-error">{{ task.error_msg }}</p>
               </div>
             </div>
@@ -360,6 +365,7 @@ onUnmounted(() => { disconnectWs() })
 .result-prompt { font-size: 14px; color: #303133; margin: 0 0 8px; line-height: 1.6; word-break: break-word; }
 .result-optimized { font-size: 13px; color: #606266; margin: 0 0 8px; line-height: 1.6; background: #f9fafc; padding: 8px 10px; border-radius: 6px; word-break: break-word; }
 .result-error { font-size: 13px; color: #f56c6c; margin: 0; }
+.opt-label { font-size: 12px; color: #909399; font-weight: 500; }
 .result-thumb { max-width: 160px; max-height: 120px; border-radius: 6px; }
 .result-thumb-lg { max-width: 280px; max-height: 240px; border-radius: 6px; }
 

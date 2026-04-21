@@ -39,6 +39,7 @@ class ModelConfig(Base):
     model_name = Column(String(100), nullable=False)
     api_key = Column(String(255), nullable=False)
     base_url = Column(String(255), nullable=True)
+    model_type = Column(String(20), default="chat")  # chat / image
     is_default = Column(Boolean, default=False)
     owner_id = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

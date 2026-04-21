@@ -32,6 +32,7 @@ class ModelConfigCreate(BaseModel):
     model_name: str
     api_key: str
     base_url: Optional[str] = None
+    model_type: str = "chat"  # chat / image
     is_default: bool = False
 
 
@@ -43,6 +44,7 @@ class ModelConfigUpdate(BaseModel):
     model_name: Optional[str] = None
     api_key: Optional[str] = None
     base_url: Optional[str] = None
+    model_type: Optional[str] = None
     is_default: Optional[bool] = None
 
 
@@ -55,6 +57,7 @@ class ModelConfigOut(BaseModel):
     model_name: str
     api_key: str
     base_url: Optional[str] = None
+    model_type: str = "chat"
     is_default: bool
     created_at: datetime
 

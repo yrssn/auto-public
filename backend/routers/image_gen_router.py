@@ -145,20 +145,34 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
             if not prompt:
                 prompt = "请分析这张商品图片"
 
-            # Resolve model config
-            config = None
+            # Resolve chat model (for prompt optimization)
+            chat_model = db.query(ModelConfig).filter(
+                ModelConfig.owner_id == user_id, ModelConfig.model_type == "chat"
+            ).first()
+            if not chat_model:
+                # Fallback: any model marked as default
+                chat_model = db.query(ModelConfig).filter(
+                    ModelConfig.owner_id == user_id, ModelConfig.is_default == True
+                ).first()
+            if not chat_model:
+                await websocket.send_json({"type": "error", "message": "请先配置聊天模型（用于优化提示词）"})
+                continue
+
+            # Resolve image model (for image generation)
+            image_model = None
             if model_config_id:
-                config = db.query(ModelConfig).filter(
+                image_model = db.query(ModelConfig).filter(
                     ModelConfig.id == model_config_id, ModelConfig.owner_id == user_id
                 ).first()
             else:
-                config = db.query(ModelConfig).filter(
-                    ModelConfig.owner_id == user_id, ModelConfig.is_default == True
+                image_model = db.query(ModelConfig).filter(
+                    ModelConfig.owner_id == user_id, ModelConfig.model_type == "image"
                 ).first()
 
-            if not config:
-                await websocket.send_json({"type": "error", "message": "请先配置模型"})
-                continue
+            chat_cfg = {"api_key": chat_model.api_key, "base_url": chat_model.base_url, "model_name": chat_model.model_name}
+            image_cfg = None
+            if image_model:
+                image_cfg = {"api_key": image_model.api_key, "base_url": image_model.base_url, "model_name": image_model.model_name}
 
             # Auto-set title
             existing = db.query(ImageTask).filter(ImageTask.conversation_id == conv_id).count()
@@ -174,7 +188,7 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                 uploaded_image=uploaded_image,
                 status="generating",
                 owner_id=user_id,
-                model_config_id=config.id,
+                model_config_id=image_model.id if image_model else chat_model.id,
             )
             db.add(task)
             db.commit()
@@ -206,9 +220,8 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                     prompt=prompt,
                     optimize=optimize,
                     image_path=image_path,
-                    api_key=config.api_key,
-                    base_url=config.base_url,
-                    model_name=config.model_name,
+                    chat_config=chat_cfg,
+                    image_config=image_cfg,
                     history=history,
                 ):
                     await websocket.send_json({"type": "progress", **update})
@@ -219,7 +232,11 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                         task = db.query(ImageTask).filter(ImageTask.id == task_id).first()
                         task.optimized_prompt = result.get("optimized_prompt")
                         task.result_image_url = result.get("image_url")
-                        task.status = "done"
+                        if result.get("error"):
+                            task.status = "failed"
+                            task.error_msg = result["error"]
+                        else:
+                            task.status = "done"
                         db.commit()
                         db.refresh(task)
                         await websocket.send_json({

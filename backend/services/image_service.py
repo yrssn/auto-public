@@ -1,4 +1,5 @@
 import base64
+import httpx
 from typing import Optional, List
 from langchain_openai import ChatOpenAI
 from langchain.schema import HumanMessage, AIMessage, SystemMessage
@@ -52,50 +53,63 @@ def build_history_messages(tasks) -> list:
     return messages
 
 
+async def call_image_api(
+    prompt: str,
+    api_key: str,
+    base_url: str,
+    model_name: str,
+    size: str = "2048x2048",
+    reference_image_path: Optional[str] = None,
+) -> str:
+    """Call OpenAI-compatible image generation API. Returns image URL.
+    Supports optional reference image for image-to-image generation."""
+    url = f"{base_url.rstrip('/')}/images/generations"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    body = {"model": model_name, "prompt": prompt, "n": 1, "size": size}
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(url, json=body, headers=headers)
+        if resp.status_code >= 400:
+            try:
+                err_detail = resp.json()
+            except Exception:
+                err_detail = resp.text
+            raise ValueError(f"API {resp.status_code}: {err_detail}")
+        data = resp.json()
+        # OpenAI format: {"data": [{"url": "..."}]}
+        images = data.get("data", [])
+        if images:
+            return images[0].get("url") or images[0].get("b64_json")
+        raise ValueError(f"图片生成 API 未返回图片数据, 响应: {data}")
+
+
 async def generate_image_stream(
     prompt: str,
     optimize: bool,
     image_path: Optional[str],
-    api_key: str,
-    base_url: Optional[str],
-    model_name: str,
+    chat_config: dict,
+    image_config: Optional[dict] = None,
     history: Optional[list] = None,
 ):
     """
     Async generator that yields status dicts during image generation.
-    Yields: {"step": str, "message": str, ...extra data}
-    Final yield includes the full result.
+    chat_config: {"api_key", "base_url", "model_name"} for prompt optimization
+    image_config: {"api_key", "base_url", "model_name"} for image generation (optional)
     """
     result = {"optimized_prompt": None, "image_url": None}
 
-    llm_kwargs = {"api_key": api_key, "model": model_name}
-    if base_url:
-        llm_kwargs["base_url"] = base_url
-
+    # Build chat LLM
+    llm_kwargs = {"api_key": chat_config["api_key"], "model": chat_config["model_name"]}
+    if chat_config.get("base_url"):
+        llm_kwargs["base_url"] = chat_config["base_url"]
     llm = ChatOpenAI(**llm_kwargs, temperature=0.7)
 
-    # Step 1: If image is provided, analyze it with vision model
-    image_analysis = None
-    if image_path:
-        yield {"step": "analyzing", "message": "正在分析图片..."}
-        b64 = _encode_image(image_path)
-        mime = _get_image_mime(image_path)
-        messages = [
-            HumanMessage(content=[
-                {"type": "text", "text": ANALYZE_IMAGE_PROMPT.format(prompt=prompt)},
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-            ])
-        ]
-        response = await llm.ainvoke(messages)
-        image_analysis = response.content.strip()
-        yield {"step": "analyzed", "message": "图片分析完成"}
-
-    # Step 2: Optimize prompt with conversation history
+    # Step 1: Optimize prompt with conversation history (text only, no image)
     if optimize:
         yield {"step": "optimizing", "message": "正在优化提示词..."}
         user_content = f"商品描述：{prompt}"
-        if image_analysis:
-            user_content += f"\n\n图片分析结果：\n{image_analysis}"
+        if image_path:
+            user_content += "\n\n（用户上传了参考图片，将直接传给图片生成模型）"
 
         messages = [SystemMessage(content=SYSTEM_PROMPT)]
         if history:
@@ -108,17 +122,26 @@ async def generate_image_stream(
         yield {"step": "optimized", "message": "提示词优化完成", "optimized_prompt": optimized}
     else:
         optimized = prompt
-        if image_analysis:
-            result["optimized_prompt"] = image_analysis
 
-    # Step 3: Try to generate image via DALL-E if available
-    yield {"step": "generating", "message": "正在生成图片..."}
-    try:
-        from langchain_community.utilities.dalle_image_generator import DallEAPIWrapper
-        dalle = DallEAPIWrapper(api_key=api_key)
-        image_url = dalle.run(optimized)
-        result["image_url"] = image_url
-    except Exception:
-        result["image_url"] = None
+    # Step 2: Generate image if image model is configured
+    if image_config:
+        yield {"step": "generating", "message": "正在生成图片..."}
+        try:
+            image_url = await call_image_api(
+                prompt=optimized,
+                api_key=image_config["api_key"],
+                base_url=image_config["base_url"],
+                model_name=image_config["model_name"],
+                reference_image_path=image_path,
+            )
+            result["image_url"] = image_url
+            yield {"step": "image_done", "message": "图片生成完成"}
+        except Exception as e:
+            error_msg = str(e)
+            result["error"] = f"图片生成失败: {error_msg}"
+            yield {"step": "image_failed", "message": f"图片生成失败: {error_msg}"}
+    else:
+        result["error"] = "未配置图片生成模型，仅返回优化提示词"
+        yield {"step": "no_image_model", "message": "未配置图片生成模型，仅返回优化提示词"}
 
     yield {"step": "done", "message": "完成", "result": result}

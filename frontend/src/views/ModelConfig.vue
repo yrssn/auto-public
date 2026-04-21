@@ -12,6 +12,13 @@
       <el-table :data="configs" stripe style="width: 100%" v-loading="loading">
         <el-table-column prop="name" label="名称" width="150" />
         <el-table-column prop="provider" label="供应商" width="120" />
+        <el-table-column label="类型" width="100" align="center">
+          <template #default="{ row }">
+            <el-tag :type="row.model_type === 'image' ? 'warning' : 'primary'" size="small">
+              {{ row.model_type === 'image' ? '图片生成' : '聊天' }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="model_name" label="模型" width="180" />
         <el-table-column prop="base_url" label="Base URL" min-width="200" show-overflow-tooltip />
         <el-table-column label="API Key" width="140">
@@ -54,8 +61,15 @@
             <el-option label="DeepSeek" value="deepseek" />
             <el-option label="智谱 AI" value="zhipu" />
             <el-option label="通义千问" value="qwen" />
+            <el-option label="字节豆包" value="doubao" />
             <el-option label="其他" value="other" />
           </el-select>
+        </el-form-item>
+        <el-form-item label="模型类型">
+          <el-radio-group v-model="form.model_type">
+            <el-radio value="chat">聊天模型（提示词优化）</el-radio>
+            <el-radio value="image">图片生成模型</el-radio>
+          </el-radio-group>
         </el-form-item>
         <el-form-item label="模型名称">
           <el-input v-model="form.model_name" placeholder="如：gpt-4o / deepseek-chat" />
@@ -95,6 +109,7 @@ const emptyForm = () => ({
   model_name: '',
   api_key: '',
   base_url: '',
+  model_type: 'chat',
   is_default: false,
 })
 const form = ref(emptyForm())
