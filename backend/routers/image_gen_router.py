@@ -1,14 +1,17 @@
 import os
+import json
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, Form, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 from typing import List, Optional
+from jose import jwt, JWTError
 
-from database import get_db
+from config import settings
+from database import get_db, SessionLocal
 from models import User, ModelConfig, ImageTask, Conversation
 from schemas import ImageTaskOut, ConversationOut, ConversationDetail
 from auth import get_current_user
-from services.image_service import generate_image, build_history_messages
+from services.image_service import generate_image_stream, build_history_messages
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -78,100 +81,185 @@ def delete_conversation(
     return {"detail": "已删除"}
 
 
-# ---- Generate (with context) ----
+# ---- Image Upload ----
 
-@router.post("/conversations/{conv_id}/generate", response_model=ImageTaskOut)
-async def create_image_task(
-    conv_id: int,
-    prompt: str = Form(...),
-    model_config_id: Optional[int] = Form(None),
-    optimize_prompt: bool = Form(True),
-    image: Optional[UploadFile] = File(None),
-    db: Session = Depends(get_db),
+@router.post("/upload")
+async def upload_image(
+    image: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
 ):
-    conv = (
-        db.query(Conversation)
-        .filter(Conversation.id == conv_id, Conversation.owner_id == current_user.id)
-        .first()
-    )
-    if not conv:
-        raise HTTPException(status_code=404, detail="会话不存在")
+    ext = os.path.splitext(image.filename)[1] or ".png"
+    filename = f"{uuid.uuid4().hex}{ext}"
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    content = await image.read()
+    with open(filepath, "wb") as f:
+        f.write(content)
+    return {"path": f"/uploads/{filename}", "filename": filename}
 
-    # Auto-set title from first prompt
-    existing_count = db.query(ImageTask).filter(ImageTask.conversation_id == conv_id).count()
-    if existing_count == 0:
-        conv.title = prompt[:50] if len(prompt) > 0 else "新会话"
 
-    # Resolve model config
-    config = None
-    if model_config_id:
-        config = (
-            db.query(ModelConfig)
-            .filter(ModelConfig.id == model_config_id, ModelConfig.owner_id == current_user.id)
-            .first()
-        )
-    else:
-        config = (
-            db.query(ModelConfig)
-            .filter(ModelConfig.owner_id == current_user.id, ModelConfig.is_default == True)
-            .first()
-        )
+# ---- WebSocket Generate ----
 
-    if not config:
-        raise HTTPException(status_code=400, detail="请先配置模型或指定模型配置ID")
+def _auth_from_token(token: str) -> Optional[int]:
+    """Extract user_id from JWT token, return None on failure."""
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        uid = payload.get("sub")
+        return int(uid) if uid else None
+    except (JWTError, ValueError):
+        return None
 
-    # Save uploaded image
-    uploaded_image_path = None
-    saved_filename = None
-    if image and image.filename:
-        ext = os.path.splitext(image.filename)[1] or ".png"
-        saved_filename = f"{uuid.uuid4().hex}{ext}"
-        filepath = os.path.join(UPLOAD_DIR, saved_filename)
-        content = await image.read()
-        with open(filepath, "wb") as f:
-            f.write(content)
-        uploaded_image_path = f"/uploads/{saved_filename}"
 
-    task = ImageTask(
-        conversation_id=conv_id,
-        role="user",
-        prompt=prompt,
-        uploaded_image=uploaded_image_path,
-        status="generating",
-        owner_id=current_user.id,
-        model_config_id=config.id,
-    )
-    db.add(task)
-    db.commit()
-    db.refresh(task)
+@router.websocket("/conversations/{conv_id}/ws")
+async def conversation_ws(websocket: WebSocket, conv_id: int):
+    token = websocket.query_params.get("token")
+    user_id = _auth_from_token(token) if token else None
+    if not user_id:
+        await websocket.close(code=4001)
+        return
 
-    # Build history from previous tasks in this conversation
-    history_tasks = (
-        db.query(ImageTask)
-        .filter(ImageTask.conversation_id == conv_id, ImageTask.id < task.id)
-        .order_by(ImageTask.created_at)
-        .all()
-    )
-    history = build_history_messages(history_tasks)
+    await websocket.accept()
+    db = SessionLocal()
 
     try:
-        result = await generate_image(
-            prompt=prompt,
-            optimize=optimize_prompt,
-            image_path=os.path.join(UPLOAD_DIR, saved_filename) if saved_filename else None,
-            api_key=config.api_key,
-            base_url=config.base_url,
-            model_name=config.model_name,
-            history=history,
-        )
-        task.optimized_prompt = result.get("optimized_prompt")
-        task.result_image_url = result.get("image_url")
-        task.status = "done"
-    except Exception as e:
-        task.status = "failed"
-        task.error_msg = str(e)
+        conv = db.query(Conversation).filter(
+            Conversation.id == conv_id, Conversation.owner_id == user_id
+        ).first()
+        if not conv:
+            await websocket.send_json({"type": "error", "message": "会话不存在"})
+            await websocket.close()
+            return
 
-    db.commit()
-    db.refresh(task)
-    return task
+        while True:
+            raw = await websocket.receive_text()
+            data = json.loads(raw)
+
+            prompt = data.get("prompt", "").strip()
+            uploaded_image = data.get("uploaded_image")
+            model_config_id = data.get("model_config_id")
+            optimize = data.get("optimize_prompt", True)
+
+            if not prompt and not uploaded_image:
+                await websocket.send_json({"type": "error", "message": "请输入描述或上传图片"})
+                continue
+
+            if not prompt:
+                prompt = "请分析这张商品图片"
+
+            # Resolve model config
+            config = None
+            if model_config_id:
+                config = db.query(ModelConfig).filter(
+                    ModelConfig.id == model_config_id, ModelConfig.owner_id == user_id
+                ).first()
+            else:
+                config = db.query(ModelConfig).filter(
+                    ModelConfig.owner_id == user_id, ModelConfig.is_default == True
+                ).first()
+
+            if not config:
+                await websocket.send_json({"type": "error", "message": "请先配置模型"})
+                continue
+
+            # Auto-set title
+            existing = db.query(ImageTask).filter(ImageTask.conversation_id == conv_id).count()
+            if existing == 0:
+                conv.title = prompt[:50]
+                db.commit()
+
+            # Create task
+            task = ImageTask(
+                conversation_id=conv_id,
+                role="user",
+                prompt=prompt,
+                uploaded_image=uploaded_image,
+                status="generating",
+                owner_id=user_id,
+                model_config_id=config.id,
+            )
+            db.add(task)
+            db.commit()
+            db.refresh(task)
+            task_id = task.id
+
+            await websocket.send_json({
+                "type": "task_created",
+                "task": _task_dict(task),
+            })
+
+            # Build history
+            history_tasks = (
+                db.query(ImageTask)
+                .filter(ImageTask.conversation_id == conv_id, ImageTask.id < task_id)
+                .order_by(ImageTask.created_at).all()
+            )
+            history = build_history_messages(history_tasks)
+
+            # Resolve image path on disk
+            image_path = None
+            if uploaded_image:
+                fname = uploaded_image.split("/")[-1]
+                image_path = os.path.join(UPLOAD_DIR, fname)
+
+            # Stream generation
+            try:
+                async for update in generate_image_stream(
+                    prompt=prompt,
+                    optimize=optimize,
+                    image_path=image_path,
+                    api_key=config.api_key,
+                    base_url=config.base_url,
+                    model_name=config.model_name,
+                    history=history,
+                ):
+                    await websocket.send_json({"type": "progress", **update})
+
+                    if update.get("step") == "done":
+                        result = update.get("result", {})
+                        db.rollback()
+                        task = db.query(ImageTask).filter(ImageTask.id == task_id).first()
+                        task.optimized_prompt = result.get("optimized_prompt")
+                        task.result_image_url = result.get("image_url")
+                        task.status = "done"
+                        db.commit()
+                        db.refresh(task)
+                        await websocket.send_json({
+                            "type": "task_updated",
+                            "task": _task_dict(task),
+                        })
+            except Exception as e:
+                db.rollback()
+                task = db.query(ImageTask).filter(ImageTask.id == task_id).first()
+                if task:
+                    task.status = "failed"
+                    task.error_msg = str(e)
+                    db.commit()
+                    db.refresh(task)
+                    await websocket.send_json({
+                        "type": "task_updated",
+                        "task": _task_dict(task),
+                    })
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
+def _task_dict(task: ImageTask) -> dict:
+    return {
+        "id": task.id,
+        "conversation_id": task.conversation_id,
+        "role": task.role,
+        "prompt": task.prompt,
+        "uploaded_image": task.uploaded_image,
+        "optimized_prompt": task.optimized_prompt,
+        "result_image_url": task.result_image_url,
+        "status": task.status,
+        "error_msg": task.error_msg,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+    }

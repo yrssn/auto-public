@@ -46,9 +46,19 @@ export const conversationAPI = {
   create: () => api.post('/image-gen/conversations'),
   get: (id) => api.get(`/image-gen/conversations/${id}`),
   delete: (id) => api.delete(`/image-gen/conversations/${id}`),
-  generate: (convId, formData) => api.post(`/image-gen/conversations/${convId}/generate`, formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-  }),
+  upload: (file) => {
+    const fd = new FormData()
+    fd.append('image', file)
+    return api.post('/image-gen/upload', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
+}
+
+export function getConvWsUrl(convId) {
+  const token = localStorage.getItem('token')
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${proto}//${location.host}/api/image-gen/conversations/${convId}/ws?token=${token}`
 }
 
 export default api

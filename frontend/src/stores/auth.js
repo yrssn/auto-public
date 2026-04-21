@@ -19,11 +19,12 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function fetchUser() {
+    if (!token.value) return
     try {
       const res = await authAPI.me()
       user.value = res.data
     } catch {
-      logout()
+      user.value = null
     }
   }
 

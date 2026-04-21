@@ -43,12 +43,15 @@ def get_current_user(
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         user_id = payload.get("sub")
         if user_id is None:
+            print(f"[AUTH DEBUG] sub is None, payload={payload}")
             raise credentials_exception
         user_id = int(user_id)
-    except JWTError:
+    except JWTError as e:
+        print(f"[AUTH DEBUG] JWTError: {e}, token[:20]={token[:20]}...")
         raise credentials_exception
 
     user = db.query(User).filter(User.id == user_id).first()
     if user is None:
+        print(f"[AUTH DEBUG] User not found for id={user_id}")
         raise credentials_exception
     return user
