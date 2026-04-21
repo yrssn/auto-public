@@ -1,18 +1,20 @@
 import base64
-from typing import Optional
+from typing import Optional, List
 from langchain_openai import ChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage
+from langchain.schema import HumanMessage, AIMessage, SystemMessage
 
 
-OPTIMIZE_SYSTEM_PROMPT = """你是一个电商产品图片提示词优化专家。
-用户会给你一段关于商品的描述（可能附带一张参考图片），请将其优化为高质量的图片生成提示词（英文）。
+SYSTEM_PROMPT = """你是一个电商产品图片提示词优化专家，支持多轮对话。
+用户会给你商品描述或参考图片，请根据对话上下文持续优化图片生成提示词。
+
 要求：
-1. 如果有参考图片，先分析图片中的产品特征、颜色、材质、造型
+1. 如果有参考图片，分析产品特征、颜色、材质、造型
 2. 结合用户的文字描述和图片信息
 3. 突出产品卖点和视觉特征
 4. 加入专业摄影术语（如光照、构图、背景）
 5. 适合电商白底图或场景图
-6. 只输出最终的英文提示词，不要解释"""
+6. 参考之前的对话内容，理解用户的迭代需求（如"换个背景"、"更亮一些"）
+7. 只输出最终的英文提示词，不要解释"""
 
 ANALYZE_IMAGE_PROMPT = """请详细分析这张商品图片，描述以下内容：
 1. 产品类型和名称
@@ -37,6 +39,19 @@ def _get_image_mime(image_path: str) -> str:
     return mime_map.get(ext, "image/png")
 
 
+def build_history_messages(tasks) -> list:
+    """Build LangChain message history from previous tasks in the conversation."""
+    messages = []
+    for t in tasks:
+        content = t.prompt
+        if t.optimized_prompt:
+            messages.append(HumanMessage(content=content))
+            messages.append(AIMessage(content=t.optimized_prompt))
+        else:
+            messages.append(HumanMessage(content=content))
+    return messages
+
+
 async def generate_image(
     prompt: str,
     optimize: bool,
@@ -44,11 +59,12 @@ async def generate_image(
     api_key: str,
     base_url: Optional[str],
     model_name: str,
+    history: Optional[list] = None,
 ) -> dict:
     """
-    Uses LangChain to:
+    Uses LangChain with conversation history to:
     1. If image uploaded: analyze the image via vision model
-    2. Optimize the prompt combining image analysis + user description
+    2. Optimize the prompt with full context
     3. Return optimized prompt (and image_url if DALL-E available)
     """
     result = {"optimized_prompt": None, "image_url": None}
@@ -73,16 +89,17 @@ async def generate_image(
         response = await llm.ainvoke(messages)
         image_analysis = response.content.strip()
 
-    # Step 2: Optimize prompt
+    # Step 2: Optimize prompt with conversation history
     if optimize:
         user_content = f"商品描述：{prompt}"
         if image_analysis:
             user_content += f"\n\n图片分析结果：\n{image_analysis}"
 
-        messages = [
-            SystemMessage(content=OPTIMIZE_SYSTEM_PROMPT),
-            HumanMessage(content=user_content),
-        ]
+        messages = [SystemMessage(content=SYSTEM_PROMPT)]
+        if history:
+            messages.extend(history)
+        messages.append(HumanMessage(content=user_content))
+
         response = await llm.ainvoke(messages)
         optimized = response.content.strip()
         result["optimized_prompt"] = optimized

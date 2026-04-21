@@ -64,6 +64,8 @@ class ImageTaskOut(BaseModel):
     model_config = {"protected_namespaces": (), "from_attributes": True}
 
     id: int
+    conversation_id: int
+    role: str
     prompt: str
     uploaded_image: Optional[str] = None
     optimized_prompt: Optional[str] = None
@@ -71,3 +73,17 @@ class ImageTaskOut(BaseModel):
     status: str
     error_msg: Optional[str] = None
     created_at: datetime
+
+
+# ---- Conversation ----
+class ConversationOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: int
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationDetail(ConversationOut):
+    tasks: list[ImageTaskOut] = []

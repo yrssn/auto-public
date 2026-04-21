@@ -14,7 +14,20 @@ class User(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     model_configs = relationship("ModelConfig", back_populates="owner")
-    image_tasks = relationship("ImageTask", back_populates="owner")
+    conversations = relationship("Conversation", back_populates="owner")
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(200), nullable=False, default="新会话")
+    owner_id = Column(Integer, ForeignKey("users.id"))
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    owner = relationship("User", back_populates="conversations")
+    tasks = relationship("ImageTask", back_populates="conversation", order_by="ImageTask.created_at")
 
 
 class ModelConfig(Base):
@@ -37,6 +50,8 @@ class ImageTask(Base):
     __tablename__ = "image_tasks"
 
     id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False)
+    role = Column(String(20), default="user")  # user / assistant
     prompt = Column(Text, nullable=False)
     uploaded_image = Column(String(500), nullable=True)
     optimized_prompt = Column(Text, nullable=True)
@@ -47,4 +62,4 @@ class ImageTask(Base):
     model_config_id = Column(Integer, ForeignKey("model_configs.id"), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-    owner = relationship("User", back_populates="image_tasks")
+    conversation = relationship("Conversation", back_populates="tasks")

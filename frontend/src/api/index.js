@@ -40,13 +40,15 @@ export const modelConfigAPI = {
   delete: (id) => api.delete(`/model-configs/${id}`),
 }
 
-// Image Generation
-export const imageGenAPI = {
-  generate: (formData) => api.post('/image-gen/', formData, {
+// Conversations
+export const conversationAPI = {
+  list: () => api.get('/image-gen/conversations'),
+  create: () => api.post('/image-gen/conversations'),
+  get: (id) => api.get(`/image-gen/conversations/${id}`),
+  delete: (id) => api.delete(`/image-gen/conversations/${id}`),
+  generate: (convId, formData) => api.post(`/image-gen/conversations/${convId}/generate`, formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   }),
-  list: () => api.get('/image-gen/'),
-  get: (id) => api.get(`/image-gen/${id}`),
 }
 
 export default api
