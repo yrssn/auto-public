@@ -23,6 +23,12 @@ const routes = [
         component: () => import('../views/ImageGen.vue'),
         meta: { title: '图片生成' },
       },
+      {
+        path: 'ziniao',
+        name: 'ZiniaoAuto',
+        component: () => import('../views/ZiniaoAuto.vue'),
+        meta: { title: '紫鸟自动化' },
+      },
     ],
   },
 ]

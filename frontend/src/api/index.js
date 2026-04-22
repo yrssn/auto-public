@@ -55,6 +55,18 @@ export const conversationAPI = {
   },
 }
 
+// Ziniao Browser
+export const ziniaoAPI = {
+  listAccounts: () => api.get('/ziniao/accounts'),
+  createAccount: (data) => api.post('/ziniao/accounts', data),
+  updateAccount: (id, data) => api.put(`/ziniao/accounts/${id}`, data),
+  deleteAccount: (id) => api.delete(`/ziniao/accounts/${id}`),
+  testConnection: (id) => api.post(`/ziniao/accounts/${id}/test-connection`),
+  getUsers: (id) => api.get(`/ziniao/accounts/${id}/users`),
+  getUserShops: (accountId, userCode) => api.get(`/ziniao/accounts/${accountId}/users/${userCode}/shops`),
+  getStoreExtend: (accountId, userCode, storeIds) => api.post(`/ziniao/accounts/${accountId}/users/${userCode}/stores/extend`, { storeIds }),
+}
+
 export function getConvWsUrl(convId) {
   const token = localStorage.getItem('token')
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'

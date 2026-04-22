@@ -48,6 +48,7 @@ authStore.fetchUser()
 
 const menuItems = [
   { path: '/image-gen', label: '图片生成', icon: 'PictureFilled' },
+  { path: '/ziniao', label: '紫鸟自动化', icon: 'Monitor' },
   { path: '/model-config', label: '模型配置', icon: 'Setting' },
 ]
 

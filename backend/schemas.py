@@ -90,3 +90,31 @@ class ConversationOut(BaseModel):
 
 class ConversationDetail(ConversationOut):
     tasks: list[ImageTaskOut] = []
+
+
+# ---- Ziniao Browser ----
+class ZiniaoAccountCreate(BaseModel):
+    name: str
+    app_id: str
+    private_key: str
+    api_base_url: str = "https://sbappstoreapi.ziniao.com"
+    user_code: Optional[str] = None
+
+
+class ZiniaoAccountUpdate(BaseModel):
+    name: Optional[str] = None
+    app_id: Optional[str] = None
+    private_key: Optional[str] = None
+    api_base_url: Optional[str] = None
+    user_code: Optional[str] = None
+
+
+class ZiniaoAccountOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: int
+    name: str
+    app_id: str
+    api_base_url: str
+    user_code: Optional[str] = None
+    created_at: datetime
