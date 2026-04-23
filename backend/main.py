@@ -9,6 +9,7 @@ from routers.auth_router import router as auth_router
 from routers.model_config_router import router as model_config_router
 from routers.image_gen_router import router as image_gen_router
 from routers.ziniao_router import router as ziniao_router
+from routers.product_selection_router import router as product_selection_router
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -27,6 +28,7 @@ app.include_router(auth_router)
 app.include_router(model_config_router)
 app.include_router(image_gen_router)
 app.include_router(ziniao_router)
+app.include_router(product_selection_router)
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)

@@ -14,8 +14,8 @@
         <el-table-column prop="provider" label="供应商" width="120" />
         <el-table-column label="类型" width="100" align="center">
           <template #default="{ row }">
-            <el-tag :type="row.model_type === 'image' ? 'warning' : 'primary'" size="small">
-              {{ row.model_type === 'image' ? '图片生成' : '聊天' }}
+            <el-tag :type="row.model_type === 'image' ? 'warning' : row.model_type === 'vision' ? 'success' : 'primary'" size="small">
+              {{ row.model_type === 'image' ? '图片生成' : row.model_type === 'vision' ? '视觉' : '聊天' }}
             </el-tag>
           </template>
         </el-table-column>
@@ -68,6 +68,7 @@
         <el-form-item label="模型类型">
           <el-radio-group v-model="form.model_type">
             <el-radio value="chat">聊天模型（提示词优化）</el-radio>
+            <el-radio value="vision">视觉模型（图片分析）</el-radio>
             <el-radio value="image">图片生成模型</el-radio>
           </el-radio-group>
         </el-form-item>

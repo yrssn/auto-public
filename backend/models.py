@@ -57,6 +57,7 @@ class ImageTask(Base):
     uploaded_image = Column(String(500), nullable=True)
     optimized_prompt = Column(Text, nullable=True)
     result_image_url = Column(String(500), nullable=True)
+    image_results_json = Column(Text, nullable=True)  # JSON array of multi-model results
     status = Column(String(20), default="pending")  # pending / generating / done / failed
     error_msg = Column(Text, nullable=True)
     owner_id = Column(Integer, ForeignKey("users.id"))

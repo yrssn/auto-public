@@ -50,12 +50,28 @@
                   fit="contain"
                 />
               </div>
-              <div class="result-output" v-if="task.optimized_prompt || task.result_image_url || task.error_msg">
+              <div class="result-output" v-if="task.optimized_prompt || task.result_image_url || task.image_results?.length || task.error_msg">
                 <div class="result-label">AI 输出</div>
                 <div v-if="task.optimized_prompt" class="result-optimized">
                   <span class="opt-label">优化提示词：</span>{{ task.optimized_prompt }}
                 </div>
-                <div v-if="task.result_image_url" style="margin-top: 8px">
+                <!-- Multi-model results -->
+                <div v-if="task.image_results?.length" class="multi-image-grid">
+                  <div v-for="(img, i) in task.image_results" :key="i" class="multi-image-card">
+                    <div class="multi-image-model">{{ img.model_name }}</div>
+                    <el-image
+                      v-if="img.image_url"
+                      :src="img.image_url"
+                      :preview-src-list="task.image_results.filter(r => r.image_url).map(r => r.image_url)"
+                      :initial-index="task.image_results.filter(r => r.image_url).findIndex(r => r.image_url === img.image_url)"
+                      class="result-thumb-lg"
+                      fit="contain"
+                    />
+                    <p v-if="img.error" class="result-error">{{ img.error }}</p>
+                  </div>
+                </div>
+                <!-- Single model result (backward compat) -->
+                <div v-else-if="task.result_image_url" style="margin-top: 8px">
                   <span class="opt-label">生成图片：</span>
                   <el-image
                     :src="task.result_image_url"
@@ -102,8 +118,13 @@
                 @keydown.enter.ctrl="handleGenerate"
               />
               <div class="input-actions">
-                <el-select v-model="form.model_config_id" placeholder="默认模型" clearable size="small" style="width: 160px">
-                  <el-option v-for="c in modelConfigs" :key="c.id" :label="c.name" :value="c.id" />
+                <el-select v-model="form.model_config_ids" placeholder="选择图片模型（可多选）" multiple collapse-tags collapse-tags-tooltip size="small" style="min-width: 200px; max-width: 360px">
+                  <el-option v-for="c in imageModels" :key="c.id" :label="c.name" :value="c.id" />
+                </el-select>
+                <el-select v-model="form.n" size="small" style="width: 90px">
+                  <el-option :value="1" label="1张" />
+                  <el-option :value="2" label="2张" />
+                  <el-option :value="4" label="4张" />
                 </el-select>
                 <el-checkbox v-model="form.optimize_prompt" size="small">AI 优化</el-checkbox>
                 <div class="ws-status">
@@ -133,12 +154,13 @@ import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { conversationAPI, modelConfigAPI, getConvWsUrl } from '../api'
 import { ElMessage } from 'element-plus'
 
-const form = ref({ prompt: '', model_config_id: null, optimize_prompt: true })
+const form = ref({ prompt: '', model_config_ids: [], optimize_prompt: true, n: 1 })
 const conversations = ref([])
 const activeConvId = ref(null)
 const tasks = ref([])
 const generating = ref(false)
 const modelConfigs = ref([])
+const imageModels = ref([])
 const resultsRef = ref(null)
 const fileList = ref([])
 const selectedFile = ref(null)
@@ -220,7 +242,11 @@ async function fetchConversations() {
   try { conversations.value = (await conversationAPI.list()).data } catch {}
 }
 async function fetchModelConfigs() {
-  try { modelConfigs.value = (await modelConfigAPI.list()).data } catch {}
+  try {
+    const all = (await modelConfigAPI.list()).data
+    modelConfigs.value = all
+    imageModels.value = all.filter(c => c.model_type === 'image')
+  } catch {}
 }
 
 async function selectConv(id) {
@@ -285,8 +311,9 @@ async function handleGenerate() {
   ws.send(JSON.stringify({
     prompt: form.value.prompt || '',
     uploaded_image: uploadedPath,
-    model_config_id: form.value.model_config_id,
+    model_config_ids: form.value.model_config_ids,
     optimize_prompt: form.value.optimize_prompt,
+    n: form.value.n,
   }))
 
   form.value.prompt = ''
@@ -368,6 +395,27 @@ onUnmounted(() => { disconnectWs() })
 .opt-label { font-size: 12px; color: #909399; font-weight: 500; }
 .result-thumb { max-width: 160px; max-height: 120px; border-radius: 6px; }
 .result-thumb-lg { max-width: 280px; max-height: 240px; border-radius: 6px; }
+
+/* Multi-model image grid */
+.multi-image-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 8px;
+}
+.multi-image-card {
+  background: #fafbfc;
+  border-radius: 8px;
+  padding: 8px;
+  border: 1px solid #f0f0f0;
+}
+.multi-image-model {
+  font-size: 12px;
+  font-weight: 600;
+  color: #409eff;
+  margin-bottom: 6px;
+  text-align: center;
+}
 
 /* ---- Progress ---- */
 .progress-bar {

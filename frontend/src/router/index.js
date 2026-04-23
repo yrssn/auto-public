@@ -24,6 +24,12 @@ const routes = [
         meta: { title: '图片生成' },
       },
       {
+        path: 'product-selection',
+        name: 'ProductSelection',
+        component: () => import('../views/ProductSelection.vue'),
+        meta: { title: '选品' },
+      },
+      {
         path: 'ziniao',
         name: 'ZiniaoAuto',
         component: () => import('../views/ZiniaoAuto.vue'),

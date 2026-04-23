@@ -56,6 +56,23 @@ export const conversationAPI = {
 }
 
 
+// Product Selection (MCP)
+export const productSelectionAPI = {
+  searchByKeyword: (keyword, page = 1) =>
+    api.get('/product-selection/search/keyword', { params: { keyword, page } }),
+  searchByImage: (imgUrl, page = 1) =>
+    api.get('/product-selection/search/image', { params: { img_url: imgUrl, page } }),
+  getProductDetail: (productId) =>
+    api.get(`/product-selection/product/${productId}`),
+  getProductRank: (categoryId, rankType = 'complex') =>
+    api.get('/product-selection/rank', { params: { category_id: categoryId, rank_type: rankType } }),
+  getRecommend: (productId, page = 1) =>
+    api.get(`/product-selection/recommend/${productId}`, { params: { page } }),
+  getTopKeywords: (categoryId) =>
+    api.get('/product-selection/top-keywords', { params: { category_id: categoryId } }),
+  getTools: () => api.get('/product-selection/tools'),
+}
+
 // Ziniao
 export const ziniaoAPI = {
   testConnection: () => api.get('/ziniao/test-connection'),

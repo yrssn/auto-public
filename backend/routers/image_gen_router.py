@@ -135,8 +135,12 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
 
             prompt = data.get("prompt", "").strip()
             uploaded_image = data.get("uploaded_image")
-            model_config_id = data.get("model_config_id")
+            # Support both old single id and new multi-select ids
+            model_config_ids = data.get("model_config_ids") or []
+            if not model_config_ids and data.get("model_config_id"):
+                model_config_ids = [data["model_config_id"]]
             optimize = data.get("optimize_prompt", True)
+            n_images = data.get("n", 1)
 
             if not prompt and not uploaded_image:
                 await websocket.send_json({"type": "error", "message": "请输入描述或上传图片"})
@@ -145,34 +149,47 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
             if not prompt:
                 prompt = "请分析这张商品图片"
 
-            # Resolve chat model (for prompt optimization)
-            chat_model = db.query(ModelConfig).filter(
-                ModelConfig.owner_id == user_id, ModelConfig.model_type == "chat"
-            ).first()
-            if not chat_model:
-                # Fallback: any model marked as default
-                chat_model = db.query(ModelConfig).filter(
+            # Resolve prompt optimization model
+            if uploaded_image and optimize:
+                prompt_model = db.query(ModelConfig).filter(
+                    ModelConfig.owner_id == user_id, ModelConfig.model_type == "vision"
+                ).first()
+                if not prompt_model:
+                    prompt_model = db.query(ModelConfig).filter(
+                        ModelConfig.owner_id == user_id, ModelConfig.model_type == "chat"
+                    ).first()
+            else:
+                prompt_model = db.query(ModelConfig).filter(
+                    ModelConfig.owner_id == user_id, ModelConfig.model_type == "chat"
+                ).first()
+
+            if not prompt_model:
+                prompt_model = db.query(ModelConfig).filter(
                     ModelConfig.owner_id == user_id, ModelConfig.is_default == True
                 ).first()
-            if not chat_model:
-                await websocket.send_json({"type": "error", "message": "请先配置聊天模型（用于优化提示词）"})
+            if not prompt_model:
+                await websocket.send_json({"type": "error", "message": "请先配置聊天模型或视觉模型（用于优化提示词）"})
                 continue
 
-            # Resolve image model (for image generation)
-            image_model = None
-            if model_config_id:
-                image_model = db.query(ModelConfig).filter(
-                    ModelConfig.id == model_config_id, ModelConfig.owner_id == user_id
-                ).first()
-            else:
-                image_model = db.query(ModelConfig).filter(
+            chat_model = prompt_model
+
+            # Resolve image models (support multiple)
+            image_models = []
+            if model_config_ids:
+                image_models = db.query(ModelConfig).filter(
+                    ModelConfig.id.in_(model_config_ids), ModelConfig.owner_id == user_id
+                ).all()
+            if not image_models:
+                # Fallback: all image models
+                image_models = db.query(ModelConfig).filter(
                     ModelConfig.owner_id == user_id, ModelConfig.model_type == "image"
-                ).first()
+                ).all()
 
             chat_cfg = {"api_key": chat_model.api_key, "base_url": chat_model.base_url, "model_name": chat_model.model_name}
-            image_cfg = None
-            if image_model:
-                image_cfg = {"api_key": image_model.api_key, "base_url": image_model.base_url, "model_name": image_model.model_name}
+            image_cfgs = [
+                {"api_key": m.api_key, "base_url": m.base_url, "model_name": m.model_name, "config_name": m.name}
+                for m in image_models
+            ]
 
             # Auto-set title
             existing = db.query(ImageTask).filter(ImageTask.conversation_id == conv_id).count()
@@ -188,7 +205,7 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                 uploaded_image=uploaded_image,
                 status="generating",
                 owner_id=user_id,
-                model_config_id=image_model.id if image_model else chat_model.id,
+                model_config_id=image_models[0].id if image_models else chat_model.id,
             )
             db.add(task)
             db.commit()
@@ -209,20 +226,35 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
             history = build_history_messages(history_tasks)
 
             # Resolve image path on disk
+            # Priority: current upload > last generated image > last uploaded image
             image_path = None
             if uploaded_image:
                 fname = uploaded_image.split("/")[-1]
                 image_path = os.path.join(UPLOAD_DIR, fname)
+            else:
+                prev_task = (
+                    db.query(ImageTask)
+                    .filter(ImageTask.conversation_id == conv_id, ImageTask.id < task_id)
+                    .order_by(ImageTask.created_at.desc())
+                    .first()
+                )
+                if prev_task:
+                    if prev_task.result_image_url:
+                        image_path = prev_task.result_image_url
+                    elif prev_task.uploaded_image:
+                        fname = prev_task.uploaded_image.split("/")[-1]
+                        image_path = os.path.join(UPLOAD_DIR, fname)
 
-            # Stream generation
+            # Stream generation (supports multiple image models)
             try:
                 async for update in generate_image_stream(
                     prompt=prompt,
                     optimize=optimize,
                     image_path=image_path,
                     chat_config=chat_cfg,
-                    image_config=image_cfg,
+                    image_configs=image_cfgs if image_cfgs else None,
                     history=history,
+                    n=n_images,
                 ):
                     await websocket.send_json({"type": "progress", **update})
 
@@ -231,8 +263,17 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                         db.rollback()
                         task = db.query(ImageTask).filter(ImageTask.id == task_id).first()
                         task.optimized_prompt = result.get("optimized_prompt")
-                        task.result_image_url = result.get("image_url")
-                        if result.get("error"):
+                        # Store first image URL for backward compat
+                        image_results = result.get("image_results", [])
+                        if image_results:
+                            first_ok = next((r for r in image_results if r.get("image_url")), None)
+                            if first_ok:
+                                task.result_image_url = first_ok["image_url"]
+                            task.image_results_json = json.dumps(image_results, ensure_ascii=False)
+                        elif result.get("image_url"):
+                            task.result_image_url = result["image_url"]
+
+                        if result.get("error") and not image_results:
                             task.status = "failed"
                             task.error_msg = result["error"]
                         else:
@@ -268,6 +309,12 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
 
 
 def _task_dict(task: ImageTask) -> dict:
+    image_results = None
+    if task.image_results_json:
+        try:
+            image_results = json.loads(task.image_results_json)
+        except (json.JSONDecodeError, TypeError):
+            pass
     return {
         "id": task.id,
         "conversation_id": task.conversation_id,
@@ -276,6 +323,7 @@ def _task_dict(task: ImageTask) -> dict:
         "uploaded_image": task.uploaded_image,
         "optimized_prompt": task.optimized_prompt,
         "result_image_url": task.result_image_url,
+        "image_results": image_results,
         "status": task.status,
         "error_msg": task.error_msg,
         "created_at": task.created_at.isoformat() if task.created_at else None,
