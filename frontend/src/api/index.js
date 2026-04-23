@@ -59,9 +59,9 @@ export const conversationAPI = {
 // Ziniao
 export const ziniaoAPI = {
   testConnection: () => api.get('/ziniao/test-connection'),
-  getUsers: () => api.get('/ziniao/users'),
-  getUserToken: (userCode) => api.get(`/ziniao/users/${userCode}/token`),
-  getUserStores: (userCode) => api.get(`/ziniao/users/${userCode}/stores`),
+  getCompany: () => api.get('/ziniao/company'),
+  getStaff: (page = 1, pageSize = 50) => api.get('/ziniao/staff', { params: { page, page_size: pageSize } }),
+  getStores: (page = 1, pageSize = 50) => api.get('/ziniao/stores', { params: { page, page_size: pageSize } }),
 }
 
 export function getConvWsUrl(convId) {
