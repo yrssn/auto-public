@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # 24 hours
 
+    ZINIAO_APP_ID: str = ""
+    ZINIAO_APP_SECRET: str = ""
+    ZINIAO_API_URL: str = "https://sbappstoreapi.ziniao.com"
+
     class Config:
         env_file = ".env"
 

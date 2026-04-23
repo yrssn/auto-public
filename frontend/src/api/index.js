@@ -55,16 +55,13 @@ export const conversationAPI = {
   },
 }
 
-// Ziniao Browser
+
+// Ziniao
 export const ziniaoAPI = {
-  listAccounts: () => api.get('/ziniao/accounts'),
-  createAccount: (data) => api.post('/ziniao/accounts', data),
-  updateAccount: (id, data) => api.put(`/ziniao/accounts/${id}`, data),
-  deleteAccount: (id) => api.delete(`/ziniao/accounts/${id}`),
-  testConnection: (id) => api.post(`/ziniao/accounts/${id}/test-connection`),
-  getUsers: (id) => api.get(`/ziniao/accounts/${id}/users`),
-  getUserShops: (accountId, userCode) => api.get(`/ziniao/accounts/${accountId}/users/${userCode}/shops`),
-  getStoreExtend: (accountId, userCode, storeIds) => api.post(`/ziniao/accounts/${accountId}/users/${userCode}/stores/extend`, { storeIds }),
+  testConnection: () => api.get('/ziniao/test-connection'),
+  getCompany: () => api.get('/ziniao/company'),
+  getStaff: (page = 1, pageSize = 50) => api.get('/ziniao/staff', { params: { page, page_size: pageSize } }),
+  getStores: (page = 1, pageSize = 50) => api.get('/ziniao/stores', { params: { page, page_size: pageSize } }),
 }
 
 export function getConvWsUrl(convId) {

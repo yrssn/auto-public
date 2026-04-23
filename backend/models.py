@@ -15,7 +15,6 @@ class User(Base):
 
     model_configs = relationship("ModelConfig", back_populates="owner")
     conversations = relationship("Conversation", back_populates="owner")
-    ziniao_accounts = relationship("ZiniaoAccount", back_populates="owner")
 
 
 class Conversation(Base):
@@ -46,21 +45,6 @@ class ModelConfig(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     owner = relationship("User", back_populates="model_configs")
-
-
-class ZiniaoAccount(Base):
-    __tablename__ = "ziniao_accounts"
-
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(100), nullable=False)
-    app_id = Column(String(255), nullable=False)
-    private_key = Column(Text, nullable=False)
-    api_base_url = Column(String(255), default="https://sbappstoreapi.ziniao.com")
-    user_code = Column(String(255), nullable=True)
-    owner_id = Column(Integer, ForeignKey("users.id"))
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-
-    owner = relationship("User", back_populates="ziniao_accounts")
 
 
 class ImageTask(Base):

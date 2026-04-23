@@ -13,16 +13,6 @@ from routers.ziniao_router import router as ziniao_router
 # Create tables
 Base.metadata.create_all(bind=engine)
 
-# Auto-migrate: add missing columns
-from sqlalchemy import inspect, text
-with engine.connect() as conn:
-    inspector = inspect(engine)
-    if 'ziniao_accounts' in inspector.get_table_names():
-        columns = [c['name'] for c in inspector.get_columns('ziniao_accounts')]
-        if 'user_code' not in columns:
-            conn.execute(text("ALTER TABLE ziniao_accounts ADD COLUMN user_code VARCHAR(255)"))
-            conn.commit()
-
 app = FastAPI(title=settings.APP_NAME)
 
 app.add_middleware(
