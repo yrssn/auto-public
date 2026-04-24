@@ -130,7 +130,7 @@ async def get_company_info(app_token: str) -> dict:
 
 # ---- 3. ERP 员工查询 ---- POST + app_token
 async def get_staff_list(app_token: str, company_id: str, page: int = 1, page_size: int = 50) -> dict:
-    biz = {"companyId": company_id, "pageNo": page, "pageSize": page_size}
+    biz = {"companyId": company_id, "pageNo": page, "limit": page_size}
     return await _post("/superbrowser/rest/v1/erp/staff/list", biz_content=biz, app_token=app_token)
 
 
