@@ -55,6 +55,7 @@ class ImageTask(Base):
     role = Column(String(20), default="user")  # user / assistant
     prompt = Column(Text, nullable=False)
     uploaded_image = Column(String(500), nullable=True)
+    uploaded_images_json = Column(Text, nullable=True)  # JSON array of multiple uploaded images
     optimized_prompt = Column(Text, nullable=True)
     result_image_url = Column(String(500), nullable=True)
     image_results_json = Column(Text, nullable=True)  # JSON array of multi-model results

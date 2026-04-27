@@ -134,7 +134,17 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
             data = json.loads(raw)
 
             prompt = data.get("prompt", "").strip()
-            uploaded_image = data.get("uploaded_image")
+            # Scene images (backgrounds/templates) and product image (subject)
+            scene_images = data.get("scene_images") or []
+            product_image = data.get("product_image")
+            # Backward compat: old uploaded_images format
+            if not scene_images and not product_image:
+                uploaded_images = data.get("uploaded_images") or []
+                if not uploaded_images and data.get("uploaded_image"):
+                    uploaded_images = [data["uploaded_image"]]
+                scene_images = uploaded_images
+            
+            has_images = bool(scene_images or product_image)
             # Support both old single id and new multi-select ids
             model_config_ids = data.get("model_config_ids") or []
             if not model_config_ids and data.get("model_config_id"):
@@ -142,15 +152,20 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
             optimize = data.get("optimize_prompt", True)
             n_images = data.get("n", 1)
 
-            if not prompt and not uploaded_image:
+            if not prompt and not has_images:
                 await websocket.send_json({"type": "error", "message": "请输入描述或上传图片"})
                 continue
 
             if not prompt:
-                prompt = "请分析这张商品图片"
+                if product_image and scene_images:
+                    prompt = "将产品图中的商品替换到这些场景图中"
+                elif scene_images:
+                    prompt = "请分析这些场景图片"
+                else:
+                    prompt = "请分析这个产品"
 
             # Resolve prompt optimization model
-            if uploaded_image and optimize:
+            if has_images and optimize:
                 prompt_model = db.query(ModelConfig).filter(
                     ModelConfig.owner_id == user_id, ModelConfig.model_type == "vision"
                 ).first()
@@ -197,12 +212,18 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                 conv.title = prompt[:50]
                 db.commit()
 
-            # Create task
+            # Create task (store scene and product images)
+            all_images = scene_images + ([product_image] if product_image else [])
+            uploaded_images_json = json.dumps({
+                "scene_images": scene_images,
+                "product_image": product_image,
+            }) if has_images else None
             task = ImageTask(
                 conversation_id=conv_id,
                 role="user",
                 prompt=prompt,
-                uploaded_image=uploaded_image,
+                uploaded_image=all_images[0] if all_images else None,
+                uploaded_images_json=uploaded_images_json,
                 status="generating",
                 owner_id=user_id,
                 model_config_id=image_models[0].id if image_models else chat_model.id,
@@ -225,13 +246,19 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
             )
             history = build_history_messages(history_tasks)
 
-            # Resolve image path on disk
-            # Priority: current upload > last generated image > last uploaded image
-            image_path = None
-            if uploaded_image:
-                fname = uploaded_image.split("/")[-1]
-                image_path = os.path.join(UPLOAD_DIR, fname)
-            else:
+            # Resolve image paths on disk
+            scene_paths = []
+            product_path = None
+            if scene_images:
+                for img_url in scene_images:
+                    fname = img_url.split("/")[-1]
+                    scene_paths.append(os.path.join(UPLOAD_DIR, fname))
+            if product_image:
+                fname = product_image.split("/")[-1]
+                product_path = os.path.join(UPLOAD_DIR, fname)
+            
+            # Fallback to previous task if no current images
+            if not scene_paths and not product_path:
                 prev_task = (
                     db.query(ImageTask)
                     .filter(ImageTask.conversation_id == conv_id, ImageTask.id < task_id)
@@ -240,17 +267,35 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                 )
                 if prev_task:
                     if prev_task.result_image_url:
-                        image_path = prev_task.result_image_url
+                        scene_paths = [prev_task.result_image_url]
+                    elif prev_task.uploaded_images_json:
+                        try:
+                            prev_data = json.loads(prev_task.uploaded_images_json)
+                            if isinstance(prev_data, dict):
+                                for img_url in prev_data.get("scene_images", []):
+                                    fname = img_url.split("/")[-1]
+                                    scene_paths.append(os.path.join(UPLOAD_DIR, fname))
+                                if prev_data.get("product_image"):
+                                    fname = prev_data["product_image"].split("/")[-1]
+                                    product_path = os.path.join(UPLOAD_DIR, fname)
+                            else:
+                                # Old format: list of images
+                                for img_url in prev_data:
+                                    fname = img_url.split("/")[-1]
+                                    scene_paths.append(os.path.join(UPLOAD_DIR, fname))
+                        except (json.JSONDecodeError, TypeError):
+                            pass
                     elif prev_task.uploaded_image:
                         fname = prev_task.uploaded_image.split("/")[-1]
-                        image_path = os.path.join(UPLOAD_DIR, fname)
+                        scene_paths = [os.path.join(UPLOAD_DIR, fname)]
 
             # Stream generation (supports multiple image models)
             try:
                 async for update in generate_image_stream(
                     prompt=prompt,
                     optimize=optimize,
-                    image_path=image_path,
+                    scene_paths=scene_paths,
+                    product_path=product_path,
                     chat_config=chat_cfg,
                     image_configs=image_cfgs if image_cfgs else None,
                     history=history,
@@ -315,12 +360,19 @@ def _task_dict(task: ImageTask) -> dict:
             image_results = json.loads(task.image_results_json)
         except (json.JSONDecodeError, TypeError):
             pass
+    uploaded_images = None
+    if task.uploaded_images_json:
+        try:
+            uploaded_images = json.loads(task.uploaded_images_json)
+        except (json.JSONDecodeError, TypeError):
+            pass
     return {
         "id": task.id,
         "conversation_id": task.conversation_id,
         "role": task.role,
         "prompt": task.prompt,
         "uploaded_image": task.uploaded_image,
+        "uploaded_images": uploaded_images,
         "optimized_prompt": task.optimized_prompt,
         "result_image_url": task.result_image_url,
         "image_results": image_results,

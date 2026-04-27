@@ -61,36 +61,43 @@ def build_history_messages(tasks) -> list:
     return messages
 
 
+def _encode_image_or_url(path: str) -> str:
+    """Encode local file as data URL or return remote URL as-is."""
+    if path.startswith("http"):
+        return path
+    img_b64 = _encode_image(path)
+    img_mime = _get_image_mime(path)
+    return f"data:{img_mime};base64,{img_b64}"
+
+
 async def call_image_api(
     prompt: str,
     api_key: str,
     base_url: str,
     model_name: str,
     size: str = "2048x2048",
-    reference_image_path: Optional[str] = None,
+    reference_image_paths: Optional[List[str]] = None,
     n: int = 1,
 ) -> str:
     """Call OpenAI-compatible image generation API. Returns image URL(s).
-    Supports optional reference image for image-to-image generation."""
+    Supports optional reference images for image-to-image generation."""
     url = f"{base_url.rstrip('/')}/images/generations"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     body = {"model": model_name, "prompt": prompt, "n": n, "size": size, "response_format": "url"}
 
-    # Include reference image for img2img if available
-    if reference_image_path:
+    # Include reference images for img2img if available
+    if reference_image_paths:
         try:
-            if reference_image_path.startswith("http"):
-                # Remote URL (e.g. previously generated image)
-                body["image"] = reference_image_path
-                logger.info(f"[ImageAPI] img2img mode, remote URL, model={model_name}")
+            if len(reference_image_paths) == 1:
+                # Single image: use "image" field
+                body["image"] = _encode_image_or_url(reference_image_paths[0])
+                logger.info(f"[ImageAPI] img2img mode, 1 ref image, model={model_name}")
             else:
-                # Local file path
-                img_b64 = _encode_image(reference_image_path)
-                img_mime = _get_image_mime(reference_image_path)
-                body["image"] = f"data:{img_mime};base64,{img_b64}"
-                logger.info(f"[ImageAPI] img2img mode, local file, model={model_name}")
+                # Multiple images: use "image" as array (API dependent)
+                body["image"] = [_encode_image_or_url(p) for p in reference_image_paths]
+                logger.info(f"[ImageAPI] img2img mode, {len(reference_image_paths)} ref images, model={model_name}")
         except Exception as e:
-            logger.warning(f"[ImageAPI] Failed to encode ref image, text2img fallback: {e}")
+            logger.warning(f"[ImageAPI] Failed to encode ref images, text2img fallback: {e}")
 
     async with httpx.AsyncClient(timeout=180) as client:
         resp = await client.post(url, json=body, headers=headers)
@@ -111,7 +118,7 @@ async def call_image_api(
         return [img.get("url") or img.get("b64_json") for img in images]
 
 
-async def _generate_one(prompt: str, cfg: dict, image_path: Optional[str], n: int = 1) -> list:
+async def _generate_one(prompt: str, cfg: dict, image_paths: Optional[List[str]], n: int = 1) -> list:
     """Generate image(s) with a single model, return list of result dicts."""
     name = cfg.get("config_name", cfg["model_name"])
     try:
@@ -120,7 +127,7 @@ async def _generate_one(prompt: str, cfg: dict, image_path: Optional[str], n: in
             api_key=cfg["api_key"],
             base_url=cfg["base_url"],
             model_name=cfg["model_name"],
-            reference_image_path=image_path,
+            reference_image_paths=image_paths if image_paths else None,
             n=n,
         )
         if isinstance(result, list):
@@ -133,7 +140,8 @@ async def _generate_one(prompt: str, cfg: dict, image_path: Optional[str], n: in
 async def generate_image_stream(
     prompt: str,
     optimize: bool,
-    image_path: Optional[str],
+    scene_paths: Optional[List[str]],
+    product_path: Optional[str],
     chat_config: dict,
     image_configs: Optional[List[dict]] = None,
     history: Optional[list] = None,
@@ -143,6 +151,8 @@ async def generate_image_stream(
     Async generator that yields status dicts during image generation.
     chat_config: {"api_key", "base_url", "model_name"} for prompt optimization
     image_configs: list of {"api_key", "base_url", "model_name", "config_name"} for image generation
+    scene_paths: list of scene/template image paths
+    product_path: product image path (to be inserted into scenes)
     """
     result = {"optimized_prompt": None, "image_url": None, "image_results": []}
 
@@ -152,28 +162,37 @@ async def generate_image_stream(
         llm_kwargs["base_url"] = chat_config["base_url"]
     llm = ChatOpenAI(**llm_kwargs, temperature=0.7)
 
+    # Combine all images for vision model
+    all_image_paths = (scene_paths or []) + ([product_path] if product_path else [])
+    has_images = bool(all_image_paths)
+
     # Step 1: Optimize prompt with conversation history
     if optimize:
         model_name = chat_config.get("model_name", "unknown")
         yield {"step": "optimizing", "message": f"正在用 {model_name} 优化提示词..."}
-        logger.info(f"[Optimize] Using model={model_name}, has_image={bool(image_path)}")
+        logger.info(f"[Optimize] Using model={model_name}, scenes={len(scene_paths or [])}, product={bool(product_path)}")
 
         messages = [SystemMessage(content=SYSTEM_PROMPT)]
         if history:
             messages.extend(history)
 
-        # Build user message: include image if uploaded (for vision models)
-        if image_path:
+        # Build user message: include images if uploaded (for vision models)
+        if has_images:
             try:
-                img_b64 = _encode_image(image_path)
-                img_mime = _get_image_mime(image_path)
-                user_msg = HumanMessage(content=[
-                    {"type": "text", "text": f"商品描述：{prompt}\n\n请分析这张参考图片并结合描述生成优化提示词。"},
-                    {"type": "image_url", "image_url": {"url": f"data:{img_mime};base64,{img_b64}"}},
-                ])
-                logger.info(f"[Optimize] Image included, mime={img_mime}, b64_len={len(img_b64)}")
+                if product_path and scene_paths:
+                    text = f"任务：{prompt}\n\n以下是场景图（模板），最后一张是产品图。请生成将产品替换到场景中的提示词。"
+                elif scene_paths:
+                    text = f"商品描述：{prompt}\n\n请分析这些场景图片并结合描述生成优化提示词。"
+                else:
+                    text = f"商品描述：{prompt}\n\n请分析这个产品图片并生成优化提示词。"
+                content_parts = [{"type": "text", "text": text}]
+                for img_path in all_image_paths:
+                    img_data = _encode_image_or_url(img_path)
+                    content_parts.append({"type": "image_url", "image_url": {"url": img_data}})
+                user_msg = HumanMessage(content=content_parts)
+                logger.info(f"[Optimize] {len(all_image_paths)} images included")
             except Exception as e:
-                logger.error(f"[Optimize] Failed to encode image: {e}")
+                logger.error(f"[Optimize] Failed to encode images: {e}")
                 user_msg = HumanMessage(content=f"商品描述：{prompt}")
         else:
             user_msg = HumanMessage(content=f"商品描述：{prompt}")
@@ -199,8 +218,8 @@ async def generate_image_stream(
         model_names = [c.get("config_name", c["model_name"]) for c in image_configs]
         yield {"step": "generating", "message": f"正在用 {len(image_configs)} 个模型并行生成图片: {', '.join(model_names)}"}
 
-        # Run all models in parallel
-        tasks = [_generate_one(optimized, cfg, image_path, n=n) for cfg in image_configs]
+        # Run all models in parallel (pass all images for img2img)
+        tasks = [_generate_one(optimized, cfg, all_image_paths if all_image_paths else None, n=n) for cfg in image_configs]
         nested_results = await asyncio.gather(*tasks)
         # Flatten: each model may return multiple images
         image_results = [r for model_results in nested_results for r in model_results]

@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from sqlalchemy import text
 from config import settings
 from database import engine, Base
 from routers.auth_router import router as auth_router
@@ -13,6 +14,24 @@ from routers.product_selection_router import router as product_selection_router
 
 # Create tables
 Base.metadata.create_all(bind=engine)
+
+# Auto-migrate: add missing columns
+def run_migrations():
+    migrations = [
+        ("image_tasks", "uploaded_images_json", "ALTER TABLE image_tasks ADD COLUMN uploaded_images_json TEXT NULL AFTER uploaded_image"),
+    ]
+    with engine.connect() as conn:
+        for table, column, sql in migrations:
+            result = conn.execute(text(f"SHOW COLUMNS FROM {table} LIKE '{column}'"))
+            if not result.fetchone():
+                print(f"[Migration] Adding column {table}.{column}")
+                conn.execute(text(sql))
+                conn.commit()
+
+try:
+    run_migrations()
+except Exception as e:
+    print(f"[Migration] Skipped: {e}")
 
 app = FastAPI(title=settings.APP_NAME)
 
