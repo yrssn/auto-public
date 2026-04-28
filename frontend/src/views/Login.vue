@@ -29,14 +29,9 @@
             :loading="loading"
             @click="handleSubmit"
           >
-            {{ isRegister ? '注 册' : '登 录' }}
+            登 录
           </el-button>
         </el-form-item>
-        <div style="text-align: center">
-          <el-link type="primary" @click="isRegister = !isRegister">
-            {{ isRegister ? '已有账号？去登录' : '没有账号？去注册' }}
-          </el-link>
-        </div>
       </el-form>
     </div>
   </div>
@@ -52,7 +47,6 @@ const router = useRouter()
 const authStore = useAuthStore()
 
 const form = ref({ username: '', password: '' })
-const isRegister = ref(false)
 const loading = ref(false)
 
 async function handleSubmit() {
@@ -62,15 +56,9 @@ async function handleSubmit() {
   }
   loading.value = true
   try {
-    if (isRegister.value) {
-      await authStore.register(form.value.username, form.value.password)
-      ElMessage.success('注册成功，请登录')
-      isRegister.value = false
-    } else {
-      await authStore.login(form.value.username, form.value.password)
-      ElMessage.success('登录成功')
-      await router.replace('/image-gen')
-    }
+    await authStore.login(form.value.username, form.value.password)
+    ElMessage.success('登录成功')
+    await router.replace('/image-gen')
   } catch (err) {
     ElMessage.error(err.response?.data?.detail || '操作失败')
   } finally {
