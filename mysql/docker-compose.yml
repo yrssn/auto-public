@@ -1,0 +1,41 @@
+version: "3.8"
+
+# ============================================================
+# 独立 MySQL 容器 —— 可供多个项目共用
+# 启动: cd mysql && docker-compose up -d
+# 其他项目通过 external network "mysql-net" 连接
+# ============================================================
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: shared-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: auto_public
+      TZ: Asia/Shanghai
+    ports:
+      - "${MYSQL_PORT:-3308}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./init:/docker-entrypoint-initdb.d
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    networks:
+      - mysql-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mysql-data:
+
+networks:
+  mysql-net:
+    name: mysql-net
+    driver: bridge

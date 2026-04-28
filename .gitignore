@@ -1,5 +1,7 @@
 /backend/.env
+/mysql/.env
 node_modules/
 __pycache__/
 *.pyc
+dist/
 .DS_Store
