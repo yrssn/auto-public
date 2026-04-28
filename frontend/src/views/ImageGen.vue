@@ -42,8 +42,35 @@
               <div class="result-input">
                 <div class="result-label">输入</div>
                 <p class="result-prompt">{{ task.prompt }}</p>
+                <!-- Scene + Product images -->
+                <div v-if="task.uploaded_images?.scene_images?.length || task.uploaded_images?.product_image" class="uploaded-images-section">
+                  <div v-if="task.uploaded_images?.scene_images?.length" class="img-group">
+                    <span class="img-group-label">场景图</span>
+                    <div class="uploaded-images-row">
+                      <el-image
+                        v-for="(img, i) in task.uploaded_images.scene_images"
+                        :key="i"
+                        :src="img"
+                        :preview-src-list="task.uploaded_images.scene_images"
+                        :initial-index="i"
+                        class="result-thumb"
+                        fit="contain"
+                      />
+                    </div>
+                  </div>
+                  <div v-if="task.uploaded_images?.product_image" class="img-group">
+                    <span class="img-group-label">产品图</span>
+                    <el-image
+                      :src="task.uploaded_images.product_image"
+                      :preview-src-list="[task.uploaded_images.product_image]"
+                      class="result-thumb"
+                      fit="contain"
+                    />
+                  </div>
+                </div>
+                <!-- Single uploaded image (backward compat) -->
                 <el-image
-                  v-if="task.uploaded_image"
+                  v-else-if="task.uploaded_image"
                   :src="task.uploaded_image"
                   :preview-src-list="[task.uploaded_image]"
                   class="result-thumb"
@@ -96,18 +123,39 @@
         <!-- Input Bar -->
         <div class="input-bar">
           <div class="input-bar-top">
-            <el-upload
-              :auto-upload="false"
-              :limit="1"
-              accept="image/*"
-              :on-change="handleFileChange"
-              :on-remove="handleFileRemove"
-              :file-list="fileList"
-              list-type="picture-card"
-              class="img-uploader"
-            >
-              <el-icon :size="18"><Plus /></el-icon>
-            </el-upload>
+            <!-- 场景/模板图 -->
+            <div class="upload-group">
+              <div class="upload-label">场景图</div>
+              <el-upload
+                :auto-upload="false"
+                :limit="5"
+                accept="image/*"
+                :on-change="handleSceneChange"
+                :on-remove="handleSceneRemove"
+                :file-list="sceneFileList"
+                list-type="picture-card"
+                class="img-uploader"
+                multiple
+              >
+                <el-icon :size="16"><Picture /></el-icon>
+              </el-upload>
+            </div>
+            <!-- 产品图 -->
+            <div class="upload-group">
+              <div class="upload-label">产品图</div>
+              <el-upload
+                :auto-upload="false"
+                :limit="1"
+                accept="image/*"
+                :on-change="handleProductChange"
+                :on-remove="handleProductRemove"
+                :file-list="productFileList"
+                list-type="picture-card"
+                class="img-uploader"
+              >
+                <el-icon :size="16"><Goods /></el-icon>
+              </el-upload>
+            </div>
             <div class="input-fields">
               <el-input
                 v-model="form.prompt"
@@ -162,8 +210,12 @@ const generating = ref(false)
 const modelConfigs = ref([])
 const imageModels = ref([])
 const resultsRef = ref(null)
-const fileList = ref([])
-const selectedFile = ref(null)
+// Scene images (backgrounds/templates)
+const sceneFileList = ref([])
+const sceneFiles = ref([])
+// Product image (subject to insert)
+const productFileList = ref([])
+const productFile = ref(null)
 const progressMsg = ref('')
 const wsConnected = ref(false)
 
@@ -179,8 +231,21 @@ function statusType(s) { return statusMap[s]?.type || 'info' }
 function statusLabel(s) { return statusMap[s]?.label || s }
 function fmtTime(t) { return t ? new Date(t).toLocaleString('zh-CN') : '' }
 
-function handleFileChange(file) { selectedFile.value = file.raw }
-function handleFileRemove() { selectedFile.value = null; fileList.value = [] }
+// Scene images handlers
+function handleSceneChange(file, files) {
+  sceneFiles.value = files.map(f => f.raw)
+}
+function handleSceneRemove(file, files) {
+  sceneFiles.value = files.map(f => f.raw)
+}
+// Product image handlers
+function handleProductChange(file) {
+  productFile.value = file.raw
+}
+function handleProductRemove() {
+  productFile.value = null
+  productFileList.value = []
+}
 
 // ---- WS Management ----
 function connectWs(convId) {
@@ -280,7 +345,11 @@ async function handleDeleteConv(id) {
 }
 
 async function handleGenerate() {
-  if (!form.value.prompt.trim() && !selectedFile.value) {
+  const hasScenes = sceneFiles.value.length > 0
+  const hasProduct = !!productFile.value
+  const hasPrompt = form.value.prompt.trim()
+
+  if (!hasPrompt && !hasScenes && !hasProduct) {
     ElMessage.warning('请输入描述或上传图片')
     return
   }
@@ -292,15 +361,32 @@ async function handleGenerate() {
   generating.value = true
   progressMsg.value = '准备中...'
 
-  // Upload image first if present
-  let uploadedPath = null
-  if (selectedFile.value) {
+  // Upload scene images
+  let scenePaths = []
+  if (hasScenes) {
     try {
-      progressMsg.value = '上传图片中...'
-      const res = await conversationAPI.upload(selectedFile.value)
-      uploadedPath = res.data.path
+      for (let i = 0; i < sceneFiles.value.length; i++) {
+        progressMsg.value = `上传场景图 (${i + 1}/${sceneFiles.value.length})...`
+        const res = await conversationAPI.upload(sceneFiles.value[i])
+        scenePaths.push(res.data.path)
+      }
     } catch {
-      ElMessage.error('图片上传失败')
+      ElMessage.error('场景图上传失败')
+      generating.value = false
+      progressMsg.value = ''
+      return
+    }
+  }
+
+  // Upload product image
+  let productPath = null
+  if (hasProduct) {
+    try {
+      progressMsg.value = '上传产品图...'
+      const res = await conversationAPI.upload(productFile.value)
+      productPath = res.data.path
+    } catch {
+      ElMessage.error('产品图上传失败')
       generating.value = false
       progressMsg.value = ''
       return
@@ -310,15 +396,18 @@ async function handleGenerate() {
   // Send via WS
   ws.send(JSON.stringify({
     prompt: form.value.prompt || '',
-    uploaded_image: uploadedPath,
+    scene_images: scenePaths,
+    product_image: productPath,
     model_config_ids: form.value.model_config_ids,
     optimize_prompt: form.value.optimize_prompt,
     n: form.value.n,
   }))
 
   form.value.prompt = ''
-  selectedFile.value = null
-  fileList.value = []
+  sceneFiles.value = []
+  sceneFileList.value = []
+  productFile.value = null
+  productFileList.value = []
 }
 
 function scrollToBottom() {
@@ -394,6 +483,11 @@ onUnmounted(() => { disconnectWs() })
 .result-error { font-size: 13px; color: #f56c6c; margin: 0; }
 .opt-label { font-size: 12px; color: #909399; font-weight: 500; }
 .result-thumb { max-width: 160px; max-height: 120px; border-radius: 6px; }
+.uploaded-images-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.uploaded-images-section { display: flex; flex-direction: column; gap: 8px; }
+.img-group { display: flex; flex-direction: column; gap: 4px; }
+.img-group-label { font-size: 11px; color: #909399; font-weight: 500; }
+.upload-tip { font-size: 11px; color: #909399; text-align: center; margin-top: 4px; }
 .result-thumb-lg { max-width: 280px; max-height: 240px; border-radius: 6px; }
 
 /* Multi-model image grid */
@@ -430,7 +524,9 @@ onUnmounted(() => { disconnectWs() })
 }
 .input-bar-top { display: flex; gap: 12px; align-items: flex-start; }
 .img-uploader { flex-shrink: 0; }
-.img-uploader :deep(.el-upload--picture-card) { width: 72px; height: 72px; }
+.img-uploader :deep(.el-upload--picture-card) { width: 64px; height: 64px; }
+.upload-group { display: flex; flex-direction: column; gap: 4px; }
+.upload-label { font-size: 11px; color: #909399; text-align: center; }
 .input-fields { flex: 1; display: flex; flex-direction: column; gap: 8px; }
 .input-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
