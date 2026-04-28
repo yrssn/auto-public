@@ -33,7 +33,7 @@ services:
     container_name: auto-public-frontend
     restart: unless-stopped
     ports:
-      - "3000:80"
+      - "9277:80"
     networks:
       - app-net
     depends_on:
