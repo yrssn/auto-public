@@ -46,7 +46,7 @@ def create_conversation(
     return conv
 
 
-@router.get("/conversations/{conv_id}", response_model=ConversationDetail)
+@router.get("/conversations/{conv_id}")
 def get_conversation(
     conv_id: int,
     db: Session = Depends(get_db),
@@ -59,7 +59,13 @@ def get_conversation(
     )
     if not conv:
         raise HTTPException(status_code=404, detail="会话不存在")
-    return conv
+    return {
+        "id": conv.id,
+        "title": conv.title,
+        "created_at": conv.created_at,
+        "updated_at": conv.updated_at,
+        "tasks": [_task_dict(t) for t in conv.tasks],
+    }
 
 
 @router.delete("/conversations/{conv_id}")

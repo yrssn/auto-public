@@ -81,7 +81,11 @@ async def call_image_api(
 ) -> str:
     """Call OpenAI-compatible image generation API. Returns image URL(s).
     Supports optional reference images for image-to-image generation."""
-    url = f"{base_url.rstrip('/')}/images/generations"
+    base = base_url.rstrip('/')
+    if base.endswith('/images/generations'):
+        url = base
+    else:
+        url = f"{base}/images/generations"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     body = {"model": model_name, "prompt": prompt, "n": n, "size": size, "response_format": "url"}
 
