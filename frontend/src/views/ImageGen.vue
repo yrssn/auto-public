@@ -43,7 +43,7 @@
                 <div class="result-label">输入</div>
                 <p class="result-prompt">{{ task.prompt }}</p>
                 <!-- Scene + Product images -->
-                <div v-if="task.uploaded_images?.scene_images?.length || task.uploaded_images?.product_image" class="uploaded-images-section">
+                <div v-if="task.uploaded_images?.scene_images?.length || task.uploaded_images?.product_images?.length || task.uploaded_images?.product_image" class="uploaded-images-section">
                   <div v-if="task.uploaded_images?.scene_images?.length" class="img-group">
                     <span class="img-group-label">场景图</span>
                     <div class="uploaded-images-row">
@@ -58,14 +58,19 @@
                       />
                     </div>
                   </div>
-                  <div v-if="task.uploaded_images?.product_image" class="img-group">
+                  <div v-if="(task.uploaded_images?.product_images?.length) || task.uploaded_images?.product_image" class="img-group">
                     <span class="img-group-label">产品图</span>
-                    <el-image
-                      :src="task.uploaded_images.product_image"
-                      :preview-src-list="[task.uploaded_images.product_image]"
-                      class="result-thumb"
-                      fit="contain"
-                    />
+                    <div class="uploaded-images-row">
+                      <el-image
+                        v-for="(img, i) in (task.uploaded_images.product_images || [task.uploaded_images.product_image].filter(Boolean))"
+                        :key="i"
+                        :src="img"
+                        :preview-src-list="task.uploaded_images.product_images || [task.uploaded_images.product_image].filter(Boolean)"
+                        :initial-index="i"
+                        class="result-thumb"
+                        fit="contain"
+                      />
+                    </div>
                   </div>
                 </div>
                 <!-- Single uploaded image (backward compat) -->
@@ -145,13 +150,14 @@
               <div class="upload-label">产品图</div>
               <el-upload
                 :auto-upload="false"
-                :limit="1"
+                :limit="5"
                 accept="image/*"
                 :on-change="handleProductChange"
                 :on-remove="handleProductRemove"
                 :file-list="productFileList"
                 list-type="picture-card"
                 class="img-uploader"
+                multiple
               >
                 <el-icon :size="16"><Goods /></el-icon>
               </el-upload>
@@ -215,7 +221,7 @@ const sceneFileList = ref([])
 const sceneFiles = ref([])
 // Product image (subject to insert)
 const productFileList = ref([])
-const productFile = ref(null)
+const productFiles = ref([])
 const progressMsg = ref('')
 const wsConnected = ref(false)
 
@@ -239,12 +245,11 @@ function handleSceneRemove(file, files) {
   sceneFiles.value = files.map(f => f.raw)
 }
 // Product image handlers
-function handleProductChange(file) {
-  productFile.value = file.raw
+function handleProductChange(file, files) {
+  productFiles.value = files.map(f => f.raw)
 }
-function handleProductRemove() {
-  productFile.value = null
-  productFileList.value = []
+function handleProductRemove(file, files) {
+  productFiles.value = files.map(f => f.raw)
 }
 
 // ---- WS Management ----
@@ -346,7 +351,7 @@ async function handleDeleteConv(id) {
 
 async function handleGenerate() {
   const hasScenes = sceneFiles.value.length > 0
-  const hasProduct = !!productFile.value
+  const hasProduct = productFiles.value.length > 0
   const hasPrompt = form.value.prompt.trim()
 
   if (!hasPrompt && !hasScenes && !hasProduct) {
@@ -378,13 +383,15 @@ async function handleGenerate() {
     }
   }
 
-  // Upload product image
-  let productPath = null
+  // Upload product images
+  let productPaths = []
   if (hasProduct) {
     try {
-      progressMsg.value = '上传产品图...'
-      const res = await conversationAPI.upload(productFile.value)
-      productPath = res.data.path
+      for (let i = 0; i < productFiles.value.length; i++) {
+        progressMsg.value = `上传产品图 (${i + 1}/${productFiles.value.length})...`
+        const res = await conversationAPI.upload(productFiles.value[i])
+        productPaths.push(res.data.path)
+      }
     } catch {
       ElMessage.error('产品图上传失败')
       generating.value = false
@@ -397,7 +404,7 @@ async function handleGenerate() {
   ws.send(JSON.stringify({
     prompt: form.value.prompt || '',
     scene_images: scenePaths,
-    product_image: productPath,
+    product_images: productPaths,
     model_config_ids: form.value.model_config_ids,
     optimize_prompt: form.value.optimize_prompt,
     n: form.value.n,
@@ -406,7 +413,7 @@ async function handleGenerate() {
   form.value.prompt = ''
   sceneFiles.value = []
   sceneFileList.value = []
-  productFile.value = null
+  productFiles.value = []
   productFileList.value = []
 }
 

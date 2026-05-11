@@ -140,17 +140,20 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
             data = json.loads(raw)
 
             prompt = data.get("prompt", "").strip()
-            # Scene images (backgrounds/templates) and product image (subject)
+            # Scene images (backgrounds/templates) and product images (subjects)
             scene_images = data.get("scene_images") or []
-            product_image = data.get("product_image")
+            product_images = data.get("product_images") or []
+            # Backward compat: old product_image single string
+            if not product_images and data.get("product_image"):
+                product_images = [data["product_image"]]
             # Backward compat: old uploaded_images format
-            if not scene_images and not product_image:
+            if not scene_images and not product_images:
                 uploaded_images = data.get("uploaded_images") or []
                 if not uploaded_images and data.get("uploaded_image"):
                     uploaded_images = [data["uploaded_image"]]
                 scene_images = uploaded_images
             
-            has_images = bool(scene_images or product_image)
+            has_images = bool(scene_images or product_images)
             # Support both old single id and new multi-select ids
             model_config_ids = data.get("model_config_ids") or []
             if not model_config_ids and data.get("model_config_id"):
@@ -163,7 +166,7 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                 continue
 
             if not prompt:
-                if product_image and scene_images:
+                if product_images and scene_images:
                     prompt = "将产品图中的商品替换到这些场景图中"
                 elif scene_images:
                     prompt = "请分析这些场景图片"
@@ -219,10 +222,10 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                 db.commit()
 
             # Create task (store scene and product images)
-            all_images = scene_images + ([product_image] if product_image else [])
+            all_images = scene_images + product_images
             uploaded_images_json = json.dumps({
                 "scene_images": scene_images,
-                "product_image": product_image,
+                "product_images": product_images,
             }) if has_images else None
             task = ImageTask(
                 conversation_id=conv_id,
@@ -254,17 +257,18 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
 
             # Resolve image paths on disk
             scene_paths = []
-            product_path = None
+            product_paths = []
             if scene_images:
                 for img_url in scene_images:
                     fname = img_url.split("/")[-1]
                     scene_paths.append(os.path.join(UPLOAD_DIR, fname))
-            if product_image:
-                fname = product_image.split("/")[-1]
-                product_path = os.path.join(UPLOAD_DIR, fname)
+            if product_images:
+                for img_url in product_images:
+                    fname = img_url.split("/")[-1]
+                    product_paths.append(os.path.join(UPLOAD_DIR, fname))
             
             # Fallback to previous task if no current images
-            if not scene_paths and not product_path:
+            if not scene_paths and not product_paths:
                 prev_task = (
                     db.query(ImageTask)
                     .filter(ImageTask.conversation_id == conv_id, ImageTask.id < task_id)
@@ -273,7 +277,17 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                 )
                 if prev_task:
                     if prev_task.result_image_url:
-                        scene_paths = [prev_task.result_image_url]
+                        # Convert URL to local path to avoid HTTP/HTTPS issues
+                        prev_url = prev_task.result_image_url
+                        if prev_url.startswith("http"):
+                            fname = prev_url.split("/")[-1]
+                            local_path = os.path.join(UPLOAD_DIR, fname)
+                            if os.path.exists(local_path):
+                                scene_paths = [local_path]
+                            else:
+                                scene_paths = [prev_url]
+                        else:
+                            scene_paths = [prev_url]
                     elif prev_task.uploaded_images_json:
                         try:
                             prev_data = json.loads(prev_task.uploaded_images_json)
@@ -281,9 +295,13 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                                 for img_url in prev_data.get("scene_images", []):
                                     fname = img_url.split("/")[-1]
                                     scene_paths.append(os.path.join(UPLOAD_DIR, fname))
-                                if prev_data.get("product_image"):
-                                    fname = prev_data["product_image"].split("/")[-1]
-                                    product_path = os.path.join(UPLOAD_DIR, fname)
+                                # Support both old product_image and new product_images
+                                prev_products = prev_data.get("product_images") or []
+                                if not prev_products and prev_data.get("product_image"):
+                                    prev_products = [prev_data["product_image"]]
+                                for img_url in prev_products:
+                                    fname = img_url.split("/")[-1]
+                                    product_paths.append(os.path.join(UPLOAD_DIR, fname))
                             else:
                                 # Old format: list of images
                                 for img_url in prev_data:
@@ -301,7 +319,7 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                     prompt=prompt,
                     optimize=optimize,
                     scene_paths=scene_paths,
-                    product_path=product_path,
+                    product_paths=product_paths,
                     chat_config=chat_cfg,
                     image_configs=image_cfgs if image_cfgs else None,
                     history=history,

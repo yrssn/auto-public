@@ -145,7 +145,7 @@ async def generate_image_stream(
     prompt: str,
     optimize: bool,
     scene_paths: Optional[List[str]],
-    product_path: Optional[str],
+    product_paths: Optional[List[str]],
     chat_config: dict,
     image_configs: Optional[List[dict]] = None,
     history: Optional[list] = None,
@@ -156,7 +156,7 @@ async def generate_image_stream(
     chat_config: {"api_key", "base_url", "model_name"} for prompt optimization
     image_configs: list of {"api_key", "base_url", "model_name", "config_name"} for image generation
     scene_paths: list of scene/template image paths
-    product_path: product image path (to be inserted into scenes)
+    product_paths: list of product image paths (to be inserted into scenes)
     """
     result = {"optimized_prompt": None, "image_url": None, "image_results": []}
 
@@ -167,14 +167,14 @@ async def generate_image_stream(
     llm = ChatOpenAI(**llm_kwargs, temperature=0.7)
 
     # Combine all images for vision model
-    all_image_paths = (scene_paths or []) + ([product_path] if product_path else [])
+    all_image_paths = (scene_paths or []) + (product_paths or [])
     has_images = bool(all_image_paths)
 
     # Step 1: Optimize prompt with conversation history
     if optimize:
         model_name = chat_config.get("model_name", "unknown")
         yield {"step": "optimizing", "message": f"正在用 {model_name} 优化提示词..."}
-        logger.info(f"[Optimize] Using model={model_name}, scenes={len(scene_paths or [])}, product={bool(product_path)}")
+        logger.info(f"[Optimize] Using model={model_name}, scenes={len(scene_paths or [])}, products={len(product_paths or [])}")
 
         messages = [SystemMessage(content=SYSTEM_PROMPT)]
         if history:
@@ -183,12 +183,12 @@ async def generate_image_stream(
         # Build user message: include images if uploaded (for vision models)
         if has_images:
             try:
-                if product_path and scene_paths:
-                    text = f"任务：{prompt}\n\n以下是场景图（模板），最后一张是产品图。请生成将产品替换到场景中的提示词。"
+                if product_paths and scene_paths:
+                    text = f"任务：{prompt}\n\n以下是场景图（模板），后面是产品图。请生成将产品替换到场景中的提示词。"
                 elif scene_paths:
                     text = f"商品描述：{prompt}\n\n请分析这些场景图片并结合描述生成优化提示词。"
                 else:
-                    text = f"商品描述：{prompt}\n\n请分析这个产品图片并生成优化提示词。"
+                    text = f"商品描述：{prompt}\n\n请分析这些产品图片并生成优化提示词。"
                 content_parts = [{"type": "text", "text": text}]
                 for img_path in all_image_paths:
                     img_data = _encode_image_or_url(img_path)
