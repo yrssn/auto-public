@@ -179,6 +179,9 @@
                   <el-option :value="1" label="1张" />
                   <el-option :value="2" label="2张" />
                   <el-option :value="4" label="4张" />
+                  <el-option :value="8" label="8张" />
+                  <el-option :value="10" label="10张" />
+                  <el-option :value="15" label="15张" />
                 </el-select>
                 <el-checkbox v-model="form.optimize_prompt" size="small">AI 优化</el-checkbox>
                 <div class="ws-status">

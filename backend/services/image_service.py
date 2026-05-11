@@ -25,6 +25,28 @@ SYSTEM_PROMPT = """你是一个AI图片生成提示词专家，支持多轮对�
 - 参考之前的对话内容，理解迭代需求
 - 只输出最终的英文提示词，不要解释"""
 
+MULTI_PROMPT_SYSTEM = """你是一个电商图片生成提示词专家。用户需要一套完整的商品图片，每张图有不同的用途。
+
+你需要根据用户的需求，生成 {n} 条不同的英文提示词，每条对应一种不同的图片类型/角度/用途。
+
+常见图片类型（根据用户需求选取）：
+- KV主图（模特穿搭/产品主视觉）
+- 卖点展示（突出面料/版型/功能特点）
+- 细节特写（材质、缝线、标签、纽扣等）
+- 场景展示（不同使用场景：外出、旅游、日常等）
+- 颜色展示（多色系对比展示）
+- 尺寸说明（尺码对照/模特身材参考）
+- 转化模块（促销氛围/限时优惠视觉）
+- 搭配展示（整套穿搭建议）
+
+要求：
+- 每条提示词要有明确的差异和用途
+- 如果有参考图片，基于图片中的产品来生成
+- 保持统一的视觉风格和色调
+- 每条提示词前用 [类型] 标注图片用途，如 [KV主图]
+- 用 --- 分隔每条提示词
+- 只输出提示词，不要解释"""
+
 ANALYZE_IMAGE_PROMPT = """请详细分析这张商品图片，描述以下内容：
 1. 产品类型和名称
 2. 颜色、材质、造型特征
@@ -123,7 +145,8 @@ async def call_image_api(
 
 
 async def _generate_one(prompt: str, cfg: dict, image_paths: Optional[List[str]], n: int = 1) -> list:
-    """Generate image(s) with a single model, return list of result dicts."""
+    """Generate image(s) with a single model, return list of result dicts.
+    First tries n parameter; if API only returns 1, falls back to parallel single calls."""
     name = cfg.get("config_name", cfg["model_name"])
     try:
         result = await call_image_api(
@@ -135,8 +158,34 @@ async def _generate_one(prompt: str, cfg: dict, image_paths: Optional[List[str]]
             n=n,
         )
         if isinstance(result, list):
-            return [{"model_name": name, "image_url": url, "error": None} for url in result]
-        return [{"model_name": name, "image_url": result, "error": None}]
+            results = [{"model_name": name, "image_url": url, "error": None} for url in result]
+        else:
+            results = [{"model_name": name, "image_url": result, "error": None}]
+
+        # If API ignored n and only returned 1, do parallel calls for the rest
+        if len(results) < n and n > 1:
+            remaining = n - len(results)
+            logger.info(f"[Generate] {name} returned {len(results)}/{n}, making {remaining} extra calls")
+            extra_tasks = [
+                call_image_api(
+                    prompt=prompt,
+                    api_key=cfg["api_key"],
+                    base_url=cfg["base_url"],
+                    model_name=cfg["model_name"],
+                    reference_image_paths=image_paths if image_paths else None,
+                    n=1,
+                )
+                for _ in range(remaining)
+            ]
+            extra_results = await asyncio.gather(*extra_tasks, return_exceptions=True)
+            for r in extra_results:
+                if isinstance(r, Exception):
+                    results.append({"model_name": name, "image_url": None, "error": str(r)})
+                elif isinstance(r, list):
+                    results.append({"model_name": name, "image_url": r[0], "error": None})
+                else:
+                    results.append({"model_name": name, "image_url": r, "error": None})
+        return results
     except Exception as e:
         return [{"model_name": name, "image_url": None, "error": str(e)}]
 
@@ -171,12 +220,19 @@ async def generate_image_stream(
     has_images = bool(all_image_paths)
 
     # Step 1: Optimize prompt with conversation history
+    multi_prompts = []  # For n>1 set generation
     if optimize:
         model_name = chat_config.get("model_name", "unknown")
         yield {"step": "optimizing", "message": f"正在用 {model_name} 优化提示词..."}
         logger.info(f"[Optimize] Using model={model_name}, scenes={len(scene_paths or [])}, products={len(product_paths or [])}")
 
-        messages = [SystemMessage(content=SYSTEM_PROMPT)]
+        # Use multi-prompt system when n > 1
+        if n > 1:
+            sys_prompt = MULTI_PROMPT_SYSTEM.replace("{n}", str(n))
+        else:
+            sys_prompt = SYSTEM_PROMPT
+
+        messages = [SystemMessage(content=sys_prompt)]
         if history:
             messages.extend(history)
 
@@ -189,6 +245,8 @@ async def generate_image_stream(
                     text = f"商品描述：{prompt}\n\n请分析这些场景图片并结合描述生成优化提示词。"
                 else:
                     text = f"商品描述：{prompt}\n\n请分析这些产品图片并生成优化提示词。"
+                if n > 1:
+                    text += f"\n\n请生成 {n} 条不同用途的提示词，用 --- 分隔。"
                 content_parts = [{"type": "text", "text": text}]
                 for img_path in all_image_paths:
                     img_data = _encode_image_or_url(img_path)
@@ -200,6 +258,8 @@ async def generate_image_stream(
                 user_msg = HumanMessage(content=f"商品描述：{prompt}")
         else:
             user_msg = HumanMessage(content=f"商品描述：{prompt}")
+            if n > 1:
+                user_msg = HumanMessage(content=f"商品描述：{prompt}\n\n请生成 {n} 条不同用途的提示词，用 --- 分隔。")
 
         messages.append(user_msg)
 
@@ -209,6 +269,11 @@ async def generate_image_stream(
             result["optimized_prompt"] = optimized
             logger.info(f"[Optimize] Success, prompt={optimized[:100]}...")
             yield {"step": "optimized", "message": "提示词优化完成", "optimized_prompt": optimized}
+
+            # Parse multiple prompts if n > 1
+            if n > 1 and "---" in optimized:
+                multi_prompts = [p.strip() for p in optimized.split("---") if p.strip()]
+                logger.info(f"[Optimize] Parsed {len(multi_prompts)} distinct prompts for set generation")
         except Exception as e:
             logger.error(f"[Optimize] LLM call failed: {e}", exc_info=True)
             optimized = prompt
@@ -220,11 +285,21 @@ async def generate_image_stream(
     # Step 2: Generate images (supports multiple models in parallel)
     if image_configs:
         model_names = [c.get("config_name", c["model_name"]) for c in image_configs]
-        yield {"step": "generating", "message": f"正在用 {len(image_configs)} 个模型并行生成图片: {', '.join(model_names)}"}
 
-        # Run all models in parallel (pass all images for img2img)
-        tasks = [_generate_one(optimized, cfg, all_image_paths if all_image_paths else None, n=n) for cfg in image_configs]
-        nested_results = await asyncio.gather(*tasks)
+        if multi_prompts:
+            # Set generation: each prompt generates 1 image per model
+            total = len(multi_prompts) * len(image_configs)
+            yield {"step": "generating", "message": f"正在生成 {len(multi_prompts)} 张不同用途的图片 x {len(image_configs)} 个模型 (共 {total} 张)"}
+            tasks = []
+            for p in multi_prompts:
+                for cfg in image_configs:
+                    tasks.append(_generate_one(p, cfg, all_image_paths if all_image_paths else None, n=1))
+            nested_results = await asyncio.gather(*tasks)
+        else:
+            yield {"step": "generating", "message": f"正在用 {len(image_configs)} 个模型并行生成图片: {', '.join(model_names)}"}
+            # Run all models in parallel (pass all images for img2img)
+            tasks = [_generate_one(optimized, cfg, all_image_paths if all_image_paths else None, n=n) for cfg in image_configs]
+            nested_results = await asyncio.gather(*tasks)
         # Flatten: each model may return multiple images
         image_results = [r for model_results in nested_results for r in model_results]
         result["image_results"] = image_results
