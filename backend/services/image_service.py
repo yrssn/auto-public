@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import logging
+import re
 import httpx
 from typing import Optional, List
 from langchain_openai import ChatOpenAI
@@ -152,10 +153,21 @@ async def call_image_api(
         return [img.get("url") or img.get("b64_json") for img in images]
 
 
+def _clean_prompt_for_api(prompt: str) -> str:
+    """Clean prompt before sending to image API: remove type labels, add single-photo constraint."""
+    # Remove [类型] labels like [KV Main], [KV主图] etc.
+    cleaned = re.sub(r'\[[\w\s/\u4e00-\u9fff]+\]\s*', '', prompt).strip()
+    # Add single-photo constraint to prevent composite layouts
+    if "single photo" not in cleaned.lower() and "single product" not in cleaned.lower():
+        cleaned += ". Single standalone photograph, not a collage, not a page layout, not a composite image."
+    return cleaned
+
+
 async def _generate_one(prompt: str, cfg: dict, image_paths: Optional[List[str]], n: int = 1) -> list:
     """Generate image(s) with a single model, return list of result dicts.
     First tries n parameter; if API only returns 1, falls back to parallel single calls."""
     name = cfg.get("config_name", cfg["model_name"])
+    prompt = _clean_prompt_for_api(prompt)
     try:
         result = await call_image_api(
             prompt=prompt,
@@ -196,6 +208,41 @@ async def _generate_one(prompt: str, cfg: dict, image_paths: Optional[List[str]]
         return results
     except Exception as e:
         return [{"model_name": name, "image_url": None, "error": str(e)}]
+
+
+FALLBACK_PHOTO_TYPES = [
+    ("KV Main", "Professional e-commerce hero shot, single product photo, model wearing the item, full body, clean minimal background, soft natural lighting, fashion photography, 800x800px"),
+    ("Detail Close-up", "Close-up detail shot of fabric texture and stitching quality, macro photography, soft lighting, single product photo, clean background, 800x800px"),
+    ("Outdoor Scene", "Fashion lifestyle photo, model wearing the item walking on a city street, natural daylight, candid style, single photo, 800x800px"),
+    ("Travel Scene", "Lifestyle photo, model wearing the item at a scenic travel destination, natural background, warm sunlight, single photo, 800x800px"),
+    ("Daily Scene", "Casual lifestyle photo, model wearing the item in a cozy cafe or home setting, relaxed pose, natural indoor lighting, single photo, 800x800px"),
+    ("Color Variation", "Flat lay product photo showing different color options of the same item side by side, clean white background, overhead shot, 800x800px"),
+    ("Back View", "Back view of model wearing the item, showing back design details, clean background, fashion photography, 800x800px"),
+    ("Coordination", "Full outfit coordination photo, model wearing the item with matching accessories bags and shoes, lifestyle fashion photography, 800x800px"),
+    ("Fabric Detail", "Extreme close-up of fabric material and texture, showing breathability and softness, studio macro photography, 800x800px"),
+    ("Selling Point", "Product feature highlight photo, showing the slim-fit silhouette design, model posing to demonstrate the flattering cut, clean background, 800x800px"),
+    ("Flat Lay", "Overhead flat lay of the neatly folded product on white background, minimalist style, studio photography, 800x800px"),
+    ("Size Reference", "Model wearing the item with height and measurement reference, clean background, showing how the item fits on body, 800x800px"),
+    ("Casual Outdoor", "Model wearing the item in a park or garden, natural greenery background, relaxed walking pose, golden hour lighting, 800x800px"),
+    ("Shopping Scene", "Model wearing the item in a shopping district, modern urban background, stylish walking pose, natural daylight, 800x800px"),
+    ("Comfort Focus", "Close-up of model comfortably wearing the item, focus on comfortable movement and stretch, natural indoor lighting, 800x800px"),
+]
+
+
+def _build_fallback_prompts(user_prompt: str, n: int) -> list:
+    """Build n different photo-type prompts as fallback when LLM optimization fails."""
+    # Extract product keywords from user prompt (rough extraction)
+    product_hint = user_prompt[:100] if user_prompt else "fashion dress"
+    prompts = []
+    for i in range(min(n, len(FALLBACK_PHOTO_TYPES))):
+        label, base = FALLBACK_PHOTO_TYPES[i]
+        prompts.append(f"[{label}] {base}, product: {product_hint}")
+    # If n > available types, cycle
+    while len(prompts) < n:
+        idx = len(prompts) % len(FALLBACK_PHOTO_TYPES)
+        label, base = FALLBACK_PHOTO_TYPES[idx]
+        prompts.append(f"[{label} v2] {base}, product: {product_hint}, different angle")
+    return prompts
 
 
 async def generate_image_stream(
@@ -287,6 +334,10 @@ async def generate_image_stream(
             optimized = prompt
             result["optimized_prompt"] = f"[优化失败，使用原始提示词] {prompt}"
             yield {"step": "optimize_failed", "message": f"提示词优化失败: {e}，使用原始提示词"}
+            # Fallback: generate varied prompts locally when LLM fails and n > 1
+            if n > 1:
+                multi_prompts = _build_fallback_prompts(prompt, n)
+                logger.info(f"[Optimize] Using {len(multi_prompts)} fallback prompts")
     else:
         optimized = prompt
 
