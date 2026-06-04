@@ -1,10 +1,15 @@
 import asyncio
 import base64
 import logging
+import os
+import uuid
 import httpx
 from typing import Optional, List
 
 logger = logging.getLogger(__name__)
+
+UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 
@@ -83,10 +88,27 @@ async def call_image_api(
     images = data.get("data", [])
     if not images:
         raise ValueError(f"图片生成 API 未返回图片数据, 响应: {data}")
+
+    def _resolve_image(img_data: dict) -> str:
+        """Return URL; if b64_json, save to file and return file path."""
+        url = img_data.get("url")
+        if url:
+            return url
+        b64 = img_data.get("b64_json")
+        if b64:
+            # Save base64 data as file
+            img_bytes = base64.b64decode(b64)
+            filename = f"{uuid.uuid4().hex}.png"
+            filepath = os.path.join(UPLOAD_DIR, filename)
+            with open(filepath, "wb") as f:
+                f.write(img_bytes)
+            logger.info(f"[ImageAPI] Saved b64_json to file: {filename} ({len(img_bytes)} bytes)")
+            return f"/uploads/{filename}"
+        raise ValueError(f"图片生成 API 未返回 url 或 b64_json, 响应: {img_data}")
+
     if n == 1:
-        return images[0].get("url") or images[0].get("b64_json")
-    # Return list of URLs for n > 1
-    return [img.get("url") or img.get("b64_json") for img in images]
+        return _resolve_image(images[0])
+    return [_resolve_image(img) for img in images]
 
 
 async def _generate_one(prompt: str, cfg: dict, image_paths: Optional[List[str]], n: int = 1) -> list:
