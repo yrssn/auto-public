@@ -3,37 +3,10 @@ import base64
 import logging
 import httpx
 from typing import Optional, List
-from langchain_openai import ChatOpenAI
-from langchain.schema import HumanMessage, AIMessage, SystemMessage
 
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = """你是一个AI图片生成提示词专家，支持多轮对话。你的任务是根据用户的需求，生成最适合图片生成模型的英文提示词。
-
-核心原则：**忠实理解用户的真实意图，不要自作主张改变需求。**
-
-场景判断：
-1. 如果用户要求"修改图片中的文字"（如改成英文、日文等），生成的提示词应明确要求保持原图的设计、布局、颜色不变，只替换文字内容和语言
-2. 如果用户要求"换背景"、"调光线"等编辑操作，提示词应描述原图内容+具体修改要求
-3. 如果用户描述商品要生成新图片，才使用电商摄影风格的提示词（白底图、场景图等）
-4. 如果用户的需求不明确，根据上下文合理推断
-
-要求：
-- 如果有参考图片，仔细分析图片内容（文字、布局、产品、颜色等）
-- 生成的提示词要精确反映用户的修改意图
-- 参考之前的对话内容，理解迭代需求
-- 只输出最终的英文提示词，不要解释"""
-
-ANALYZE_IMAGE_PROMPT = """请详细分析这张商品图片，描述以下内容：
-1. 产品类型和名称
-2. 颜色、材质、造型特征
-3. 拍摄角度和背景
-4. 产品卖点和适用场景
-
-用户补充说明：{prompt}
-
-请用中文详细描述。"""
 
 
 def _encode_image(image_path: str) -> str:
@@ -48,17 +21,6 @@ def _get_image_mime(image_path: str) -> str:
     return mime_map.get(ext, "image/png")
 
 
-def build_history_messages(tasks) -> list:
-    """Build LangChain message history from previous tasks in the conversation."""
-    messages = []
-    for t in tasks:
-        content = t.prompt
-        if t.optimized_prompt:
-            messages.append(HumanMessage(content=content))
-            messages.append(AIMessage(content=t.optimized_prompt))
-        else:
-            messages.append(HumanMessage(content=content))
-    return messages
 
 
 def _encode_image_or_url(path: str) -> str:
@@ -86,36 +48,45 @@ async def call_image_api(
     body = {"model": model_name, "prompt": prompt, "n": n, "size": size, "response_format": "url"}
 
     # Include reference images for img2img if available
+    # Always send as array to match standard: "image": ["string", ...]
     if reference_image_paths:
         try:
-            if len(reference_image_paths) == 1:
-                # Single image: use "image" field
-                body["image"] = _encode_image_or_url(reference_image_paths[0])
-                logger.info(f"[ImageAPI] img2img mode, 1 ref image, model={model_name}")
-            else:
-                # Multiple images: use "image" as array (API dependent)
-                body["image"] = [_encode_image_or_url(p) for p in reference_image_paths]
-                logger.info(f"[ImageAPI] img2img mode, {len(reference_image_paths)} ref images, model={model_name}")
+            body["image"] = [_encode_image_or_url(p) for p in reference_image_paths]
+            logger.info(f"[ImageAPI] img2img mode, {len(reference_image_paths)} ref image(s), model={model_name}")
         except Exception as e:
             logger.warning(f"[ImageAPI] Failed to encode ref images, text2img fallback: {e}")
 
-    async with httpx.AsyncClient(timeout=180) as client:
-        resp = await client.post(url, json=body, headers=headers)
-        if resp.status_code >= 400:
-            try:
-                err_detail = resp.json()
-            except Exception:
-                err_detail = resp.text
-            raise ValueError(f"API {resp.status_code}: {err_detail}")
-        data = resp.json()
-        # OpenAI format: {"data": [{"url": "..."}]}
-        images = data.get("data", [])
-        if not images:
-            raise ValueError(f"图片生成 API 未返回图片数据, 响应: {data}")
-        if n == 1:
-            return images[0].get("url") or images[0].get("b64_json")
-        # Return list of URLs for n > 1
-        return [img.get("url") or img.get("b64_json") for img in images]
+    logger.info(f"[ImageAPI] Request: url={url}, model={model_name}, has_image={bool(reference_image_paths)}, size={size}")
+
+    try:
+        async with httpx.AsyncClient(timeout=180) as client:
+            resp = await client.post(url, json=body, headers=headers)
+    except httpx.RemoteProtocolError as e:
+        raise ValueError(f"服务端断开连接（可能是请求体过大或模型不支持图片输入）: {e}")
+    except httpx.ReadTimeout:
+        raise ValueError(f"请求超时（180秒），模型可能处理时间过长")
+    except httpx.ConnectError as e:
+        raise ValueError(f"连接失败，请检查 base_url 是否正确: {e}")
+    except httpx.HTTPStatusError as e:
+        raise ValueError(f"HTTP 错误: {e}")
+
+    logger.info(f"[ImageAPI] Response status={resp.status_code}")
+
+    if resp.status_code >= 400:
+        try:
+            err_detail = resp.json()
+        except Exception:
+            err_detail = resp.text
+        raise ValueError(f"API {resp.status_code}: {err_detail}")
+    data = resp.json()
+    # OpenAI format: {"data": [{"url": "..."}]}
+    images = data.get("data", [])
+    if not images:
+        raise ValueError(f"图片生成 API 未返回图片数据, 响应: {data}")
+    if n == 1:
+        return images[0].get("url") or images[0].get("b64_json")
+    # Return list of URLs for n > 1
+    return [img.get("url") or img.get("b64_json") for img in images]
 
 
 async def _generate_one(prompt: str, cfg: dict, image_paths: Optional[List[str]], n: int = 1) -> list:
@@ -139,87 +110,26 @@ async def _generate_one(prompt: str, cfg: dict, image_paths: Optional[List[str]]
 
 async def generate_image_stream(
     prompt: str,
-    optimize: bool,
-    scene_paths: Optional[List[str]],
     product_path: Optional[str],
-    chat_config: dict,
     image_configs: Optional[List[dict]] = None,
-    history: Optional[list] = None,
     n: int = 1,
 ):
     """
     Async generator that yields status dicts during image generation.
-    chat_config: {"api_key", "base_url", "model_name"} for prompt optimization
     image_configs: list of {"api_key", "base_url", "model_name", "config_name"} for image generation
-    scene_paths: list of scene/template image paths
-    product_path: product image path (to be inserted into scenes)
+    product_path: product image path (for img2img)
     """
     result = {"optimized_prompt": None, "image_url": None, "image_results": []}
 
-    # Build chat LLM
-    llm_kwargs = {"api_key": chat_config["api_key"], "model": chat_config["model_name"]}
-    if chat_config.get("base_url"):
-        llm_kwargs["base_url"] = chat_config["base_url"]
-    llm = ChatOpenAI(**llm_kwargs, temperature=0.7)
+    image_paths = [product_path] if product_path else None
 
-    # Combine all images for vision model
-    all_image_paths = (scene_paths or []) + ([product_path] if product_path else [])
-    has_images = bool(all_image_paths)
-
-    # Step 1: Optimize prompt with conversation history
-    if optimize:
-        model_name = chat_config.get("model_name", "unknown")
-        yield {"step": "optimizing", "message": f"正在用 {model_name} 优化提示词..."}
-        logger.info(f"[Optimize] Using model={model_name}, scenes={len(scene_paths or [])}, product={bool(product_path)}")
-
-        messages = [SystemMessage(content=SYSTEM_PROMPT)]
-        if history:
-            messages.extend(history)
-
-        # Build user message: include images if uploaded (for vision models)
-        if has_images:
-            try:
-                if product_path and scene_paths:
-                    text = f"任务：{prompt}\n\n以下是场景图（模板），最后一张是产品图。请生成将产品替换到场景中的提示词。"
-                elif scene_paths:
-                    text = f"商品描述：{prompt}\n\n请分析这些场景图片并结合描述生成优化提示词。"
-                else:
-                    text = f"商品描述：{prompt}\n\n请分析这个产品图片并生成优化提示词。"
-                content_parts = [{"type": "text", "text": text}]
-                for img_path in all_image_paths:
-                    img_data = _encode_image_or_url(img_path)
-                    content_parts.append({"type": "image_url", "image_url": {"url": img_data}})
-                user_msg = HumanMessage(content=content_parts)
-                logger.info(f"[Optimize] {len(all_image_paths)} images included")
-            except Exception as e:
-                logger.error(f"[Optimize] Failed to encode images: {e}")
-                user_msg = HumanMessage(content=f"商品描述：{prompt}")
-        else:
-            user_msg = HumanMessage(content=f"商品描述：{prompt}")
-
-        messages.append(user_msg)
-
-        try:
-            response = await llm.ainvoke(messages)
-            optimized = response.content.strip()
-            result["optimized_prompt"] = optimized
-            logger.info(f"[Optimize] Success, prompt={optimized[:100]}...")
-            yield {"step": "optimized", "message": "提示词优化完成", "optimized_prompt": optimized}
-        except Exception as e:
-            logger.error(f"[Optimize] LLM call failed: {e}", exc_info=True)
-            optimized = prompt
-            result["optimized_prompt"] = f"[优化失败，使用原始提示词] {prompt}"
-            yield {"step": "optimize_failed", "message": f"提示词优化失败: {e}，使用原始提示词"}
-    else:
-        optimized = prompt
-
-    # Step 2: Generate images (supports multiple models in parallel)
+    # Generate images (supports multiple models in parallel)
     if image_configs:
         model_names = [c.get("config_name", c["model_name"]) for c in image_configs]
         yield {"step": "generating", "message": f"正在用 {len(image_configs)} 个模型并行生成图片: {', '.join(model_names)}"}
 
-        # Run all models in parallel (pass all images for img2img)
-        tasks = [_generate_one(optimized, cfg, all_image_paths if all_image_paths else None, n=n) for cfg in image_configs]
+        # Run all models in parallel (pass product image for img2img)
+        tasks = [_generate_one(prompt, cfg, image_paths, n=n) for cfg in image_configs]
         nested_results = await asyncio.gather(*tasks)
         # Flatten: each model may return multiple images
         image_results = [r for model_results in nested_results for r in model_results]
@@ -237,7 +147,7 @@ async def generate_image_stream(
             msg += f", {fail_count} 失败"
         yield {"step": "image_done", "message": msg}
     else:
-        result["error"] = "未配置图片生成模型，仅返回优化提示词"
-        yield {"step": "no_image_model", "message": "未配置图片生成模型，仅返回优化提示词"}
+        result["error"] = "未配置图片生成模型"
+        yield {"step": "no_image_model", "message": "未配置图片生成模型"}
 
     yield {"step": "done", "message": "完成", "result": result}
