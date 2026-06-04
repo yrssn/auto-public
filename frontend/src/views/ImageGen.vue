@@ -324,9 +324,15 @@ async function selectConv(id) {
   // Update activeWs and wsConnected
   activeWs = wsMap.get(id) || null
   wsConnected.value = activeWs?.readyState === WebSocket.OPEN
-  // Clear progress from previous conv
-  progressMsg.value = ''
-  generating.value = false
+  // Check if there are tasks still generating (backend may still be running them)
+  const hasGenerating = tasks.value.some(t => t.status === 'generating')
+  if (hasGenerating) {
+    generating.value = true
+    progressMsg.value = '生成中...'
+  } else {
+    progressMsg.value = ''
+    generating.value = false
+  }
 }
 
 async function handleNewConv() {

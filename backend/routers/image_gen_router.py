@@ -60,17 +60,6 @@ def get_conversation(
     if not conv:
         raise HTTPException(status_code=404, detail="会话不存在")
 
-    # Mark stale "generating" tasks as failed (page was refreshed during generation)
-    stale = db.query(ImageTask).filter(
-        ImageTask.conversation_id == conv_id,
-        ImageTask.status == "generating",
-    ).all()
-    for t in stale:
-        t.status = "failed"
-        t.error_msg = t.error_msg or "生成中断（页面刷新或连接断开）"
-    if stale:
-        db.commit()
-
     return conv
 
 
@@ -243,6 +232,8 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
             db.close()
 
             # Stream generation (supports multiple image models)
+            # Generation runs independently of WS - results are saved to DB
+            # so even if WS disconnects, task will be updated in DB
             try:
                 async for update in generate_image_stream(
                     prompt=prompt,
@@ -250,7 +241,11 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                     image_configs=image_cfgs if image_cfgs else None,
                     n=n_images,
                 ):
-                    await websocket.send_json({"type": "progress", **update})
+                    # Try to send progress via WS (ignore if disconnected)
+                    try:
+                        await websocket.send_json({"type": "progress", **update})
+                    except Exception:
+                        pass  # WS disconnected, but generation continues
 
                     if update.get("step") == "done":
                         result = update.get("result", {})
@@ -283,10 +278,14 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                             task.status = "done"
                         db.commit()
                         db.refresh(task)
-                        await websocket.send_json({
-                            "type": "task_updated",
-                            "task": _task_dict(task),
-                        })
+                        # Try to notify via WS (ignore if disconnected)
+                        try:
+                            await websocket.send_json({
+                                "type": "task_updated",
+                                "task": _task_dict(task),
+                            })
+                        except Exception:
+                            pass  # WS disconnected, result saved to DB
                         db.close()
             except Exception as e:
                 # Fresh db session to save error
@@ -301,10 +300,13 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                     task.error_msg = str(e)
                     db.commit()
                     db.refresh(task)
-                    await websocket.send_json({
-                        "type": "task_updated",
-                        "task": _task_dict(task),
-                    })
+                    try:
+                        await websocket.send_json({
+                            "type": "task_updated",
+                            "task": _task_dict(task),
+                        })
+                    except Exception:
+                        pass  # WS disconnected, error saved to DB
                 db.close()
 
     except WebSocketDisconnect:

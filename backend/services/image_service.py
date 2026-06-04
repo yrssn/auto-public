@@ -59,12 +59,12 @@ async def call_image_api(
     logger.info(f"[ImageAPI] Request: url={url}, model={model_name}, has_image={bool(reference_image_paths)}, size={size}")
 
     try:
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=600) as client:
             resp = await client.post(url, json=body, headers=headers)
     except httpx.RemoteProtocolError as e:
         raise ValueError(f"服务端断开连接（可能是请求体过大或模型不支持图片输入）: {e}")
     except httpx.ReadTimeout:
-        raise ValueError(f"请求超时（180秒），模型可能处理时间过长")
+        raise ValueError(f"请求超时（600秒），模型处理时间过长")
     except httpx.ConnectError as e:
         raise ValueError(f"连接失败，请检查 base_url 是否正确: {e}")
     except httpx.HTTPStatusError as e:
