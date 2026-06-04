@@ -29,7 +29,7 @@
         <div class="results-area" ref="resultsRef">
           <div v-if="!tasks.length && !progressMsg" class="results-empty">
             <el-icon :size="48" style="color: #dcdfe6"><PictureFilled /></el-icon>
-            <p>上传商品图片或输入描述开始生成</p>
+            <p>上传产品图片开始生成</p>
           </div>
 
           <div v-for="(task, idx) in tasks" :key="task.id" class="result-card">
@@ -42,33 +42,16 @@
               <div class="result-input">
                 <div class="result-label">输入</div>
                 <p class="result-prompt">{{ task.prompt }}</p>
-                <!-- Scene + Product images -->
-                <div v-if="task.uploaded_images?.scene_images?.length || task.uploaded_images?.product_image" class="uploaded-images-section">
-                  <div v-if="task.uploaded_images?.scene_images?.length" class="img-group">
-                    <span class="img-group-label">场景图</span>
-                    <div class="uploaded-images-row">
-                      <el-image
-                        v-for="(img, i) in task.uploaded_images.scene_images"
-                        :key="i"
-                        :src="img"
-                        :preview-src-list="task.uploaded_images.scene_images"
-                        :initial-index="i"
-                        class="result-thumb"
-                        fit="contain"
-                      />
-                    </div>
-                  </div>
-                  <div v-if="task.uploaded_images?.product_image" class="img-group">
-                    <span class="img-group-label">产品图</span>
-                    <el-image
-                      :src="task.uploaded_images.product_image"
-                      :preview-src-list="[task.uploaded_images.product_image]"
-                      class="result-thumb"
-                      fit="contain"
-                    />
-                  </div>
+                <!-- Product image -->
+                <div v-if="task.uploaded_images?.product_image" class="img-group">
+                  <span class="img-group-label">产品图</span>
+                  <el-image
+                    :src="task.uploaded_images.product_image"
+                    :preview-src-list="[task.uploaded_images.product_image]"
+                    class="result-thumb"
+                    fit="contain"
+                  />
                 </div>
-                <!-- Single uploaded image (backward compat) -->
                 <el-image
                   v-else-if="task.uploaded_image"
                   :src="task.uploaded_image"
@@ -77,7 +60,12 @@
                   fit="contain"
                 />
               </div>
-              <div class="result-output" v-if="task.optimized_prompt || task.result_image_url || task.image_results?.length || task.error_msg">
+              <!-- Error message (always visible when failed) -->
+              <div v-if="task.status === 'failed' && task.error_msg" class="result-error-block">
+                <el-icon style="color: #f56c6c; margin-right: 4px"><WarningFilled /></el-icon>
+                <span>{{ task.error_msg }}</span>
+              </div>
+              <div class="result-output" v-if="task.optimized_prompt || task.result_image_url || task.image_results?.length">
                 <div class="result-label">AI 输出</div>
                 <div v-if="task.optimized_prompt" class="result-optimized">
                   <span class="opt-label">优化提示词：</span>{{ task.optimized_prompt }}
@@ -94,7 +82,10 @@
                       class="result-thumb-lg"
                       fit="contain"
                     />
-                    <p v-if="img.error" class="result-error">{{ img.error }}</p>
+                    <div v-if="img.error" class="result-error-detail">
+                      <el-icon style="color: #f56c6c; margin-right: 4px"><WarningFilled /></el-icon>
+                      <span>{{ img.error }}</span>
+                    </div>
                   </div>
                 </div>
                 <!-- Single model result (backward compat) -->
@@ -108,7 +99,6 @@
                     style="margin-top: 4px"
                   />
                 </div>
-                <p v-if="task.error_msg" class="result-error">{{ task.error_msg }}</p>
               </div>
             </div>
           </div>
@@ -123,23 +113,6 @@
         <!-- Input Bar -->
         <div class="input-bar">
           <div class="input-bar-top">
-            <!-- 场景/模板图 -->
-            <div class="upload-group">
-              <div class="upload-label">场景图</div>
-              <el-upload
-                :auto-upload="false"
-                :limit="5"
-                accept="image/*"
-                :on-change="handleSceneChange"
-                :on-remove="handleSceneRemove"
-                :file-list="sceneFileList"
-                list-type="picture-card"
-                class="img-uploader"
-                multiple
-              >
-                <el-icon :size="16"><Picture /></el-icon>
-              </el-upload>
-            </div>
             <!-- 产品图 -->
             <div class="upload-group">
               <div class="upload-label">产品图</div>
@@ -161,7 +134,7 @@
                 v-model="form.prompt"
                 type="textarea"
                 :rows="2"
-                placeholder="输入商品描述，支持多轮迭代（换个背景 / 光线更柔和）"
+                placeholder="输入商品描述（可选）"
                 :disabled="generating"
                 @keydown.enter.ctrl="handleGenerate"
               />
@@ -174,7 +147,6 @@
                   <el-option :value="2" label="2张" />
                   <el-option :value="4" label="4张" />
                 </el-select>
-                <el-checkbox v-model="form.optimize_prompt" size="small">AI 优化</el-checkbox>
                 <div class="ws-status">
                   <span class="ws-dot" :class="wsConnected ? 'on' : 'off'"></span>
                   {{ wsConnected ? '已连接' : '未连接' }}
@@ -202,7 +174,7 @@ import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { conversationAPI, modelConfigAPI, getConvWsUrl } from '../api'
 import { ElMessage } from 'element-plus'
 
-const form = ref({ prompt: '', model_config_ids: [], optimize_prompt: true, n: 1 })
+const form = ref({ prompt: '', model_config_ids: [], optimize_prompt: false, n: 1 })
 const conversations = ref([])
 const activeConvId = ref(null)
 const tasks = ref([])
@@ -210,16 +182,15 @@ const generating = ref(false)
 const modelConfigs = ref([])
 const imageModels = ref([])
 const resultsRef = ref(null)
-// Scene images (backgrounds/templates)
-const sceneFileList = ref([])
-const sceneFiles = ref([])
 // Product image (subject to insert)
 const productFileList = ref([])
 const productFile = ref(null)
 const progressMsg = ref('')
 const wsConnected = ref(false)
 
-let ws = null
+// Map of convId -> WebSocket, supports multiple concurrent WS connections
+const wsMap = new Map()
+let activeWs = null
 
 const statusMap = {
   pending: { label: '等待中', type: 'info' },
@@ -231,13 +202,6 @@ function statusType(s) { return statusMap[s]?.type || 'info' }
 function statusLabel(s) { return statusMap[s]?.label || s }
 function fmtTime(t) { return t ? new Date(t).toLocaleString('zh-CN') : '' }
 
-// Scene images handlers
-function handleSceneChange(file, files) {
-  sceneFiles.value = files.map(f => f.raw)
-}
-function handleSceneRemove(file, files) {
-  sceneFiles.value = files.map(f => f.raw)
-}
 // Product image handlers
 function handleProductChange(file) {
   productFile.value = file.raw
@@ -249,56 +213,91 @@ function handleProductRemove() {
 
 // ---- WS Management ----
 function connectWs(convId) {
-  disconnectWs()
+  // Reuse existing connection if available
+  if (wsMap.has(convId) && wsMap.get(convId).readyState === WebSocket.OPEN) {
+    activeWs = wsMap.get(convId)
+    wsConnected.value = true
+    return
+  }
   const url = getConvWsUrl(convId)
-  ws = new WebSocket(url)
+  const socket = new WebSocket(url)
+  wsMap.set(convId, socket)
+  activeWs = socket
 
-  ws.onopen = () => { wsConnected.value = true }
-  ws.onclose = () => { wsConnected.value = false; ws = null }
-  ws.onerror = () => { wsConnected.value = false }
+  socket.onopen = () => {
+    if (activeConvId.value === convId) wsConnected.value = true
+  }
+  socket.onclose = () => {
+    wsMap.delete(convId)
+    if (activeConvId.value === convId) wsConnected.value = false
+    if (activeWs === socket) activeWs = null
+  }
+  socket.onerror = () => {
+    if (activeConvId.value === convId) wsConnected.value = false
+  }
 
-  ws.onmessage = (e) => {
+  socket.onmessage = (e) => {
     const msg = JSON.parse(e.data)
-    handleWsMessage(msg)
+    handleWsMessage(msg, convId)
   }
 }
 
-function disconnectWs() {
-  if (ws) {
-    ws.onclose = null
-    ws.close()
-    ws = null
-    wsConnected.value = false
-  }
-}
-
-function handleWsMessage(msg) {
-  if (msg.type === 'task_created') {
-    tasks.value.push(msg.task)
-    nextTick(scrollToBottom)
-  } else if (msg.type === 'progress') {
-    progressMsg.value = msg.message || ''
-    // Live update optimized_prompt on task
-    if (msg.optimized_prompt && tasks.value.length) {
-      const last = tasks.value[tasks.value.length - 1]
-      last.optimized_prompt = msg.optimized_prompt
+function disconnectWs(convId) {
+  if (convId != null) {
+    const socket = wsMap.get(convId)
+    if (socket) {
+      socket.onclose = null
+      socket.close()
+      wsMap.delete(convId)
+      if (activeWs === socket) activeWs = null
     }
-    nextTick(scrollToBottom)
-  } else if (msg.type === 'task_updated') {
-    progressMsg.value = ''
-    generating.value = false
-    const idx = tasks.value.findIndex(t => t.id === msg.task.id)
-    if (idx >= 0) {
-      tasks.value[idx] = msg.task
-    } else {
+  } else {
+    // Disconnect all
+    for (const [, socket] of wsMap) {
+      socket.onclose = null
+      socket.close()
+    }
+    wsMap.clear()
+    activeWs = null
+  }
+  wsConnected.value = false
+}
+
+function handleWsMessage(msg, convId) {
+  const isActive = convId === activeConvId.value
+  if (msg.type === 'task_created') {
+    if (isActive) {
       tasks.value.push(msg.task)
+      nextTick(scrollToBottom)
+    }
+  } else if (msg.type === 'progress') {
+    if (isActive) {
+      progressMsg.value = msg.message || ''
+      if (msg.optimized_prompt && tasks.value.length) {
+        const last = tasks.value[tasks.value.length - 1]
+        last.optimized_prompt = msg.optimized_prompt
+      }
+      nextTick(scrollToBottom)
+    }
+  } else if (msg.type === 'task_updated') {
+    if (isActive) {
+      progressMsg.value = ''
+      generating.value = false
+      const idx = tasks.value.findIndex(t => t.id === msg.task.id)
+      if (idx >= 0) {
+        tasks.value[idx] = msg.task
+      } else {
+        tasks.value.push(msg.task)
+      }
+      nextTick(scrollToBottom)
     }
     fetchConversations()
-    nextTick(scrollToBottom)
   } else if (msg.type === 'error') {
-    progressMsg.value = ''
-    generating.value = false
-    ElMessage.error(msg.message)
+    if (isActive) {
+      progressMsg.value = ''
+      generating.value = false
+      ElMessage.error(msg.message)
+    }
   }
 }
 
@@ -322,6 +321,12 @@ async function selectConv(id) {
     scrollToBottom()
   } catch { tasks.value = [] }
   connectWs(id)
+  // Update activeWs and wsConnected
+  activeWs = wsMap.get(id) || null
+  wsConnected.value = activeWs?.readyState === WebSocket.OPEN
+  // Clear progress from previous conv
+  progressMsg.value = ''
+  generating.value = false
 }
 
 async function handleNewConv() {
@@ -339,44 +344,28 @@ async function handleDeleteConv(id) {
     if (activeConvId.value === id) {
       activeConvId.value = null
       tasks.value = []
-      disconnectWs()
+      disconnectWs(id)
+    } else {
+      disconnectWs(id)
     }
   } catch { ElMessage.error('删除失败') }
 }
 
 async function handleGenerate() {
-  const hasScenes = sceneFiles.value.length > 0
   const hasProduct = !!productFile.value
   const hasPrompt = form.value.prompt.trim()
 
-  if (!hasPrompt && !hasScenes && !hasProduct) {
-    ElMessage.warning('请输入描述或上传图片')
+  if (!hasPrompt && !hasProduct) {
+    ElMessage.warning('请上传产品图片或输入描述')
     return
   }
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
+  if (!activeWs || activeWs.readyState !== WebSocket.OPEN) {
     ElMessage.error('WebSocket 未连接，请刷新页面')
     return
   }
 
   generating.value = true
   progressMsg.value = '准备中...'
-
-  // Upload scene images
-  let scenePaths = []
-  if (hasScenes) {
-    try {
-      for (let i = 0; i < sceneFiles.value.length; i++) {
-        progressMsg.value = `上传场景图 (${i + 1}/${sceneFiles.value.length})...`
-        const res = await conversationAPI.upload(sceneFiles.value[i])
-        scenePaths.push(res.data.path)
-      }
-    } catch {
-      ElMessage.error('场景图上传失败')
-      generating.value = false
-      progressMsg.value = ''
-      return
-    }
-  }
 
   // Upload product image
   let productPath = null
@@ -394,18 +383,15 @@ async function handleGenerate() {
   }
 
   // Send via WS
-  ws.send(JSON.stringify({
+  activeWs.send(JSON.stringify({
     prompt: form.value.prompt || '',
-    scene_images: scenePaths,
     product_image: productPath,
     model_config_ids: form.value.model_config_ids,
-    optimize_prompt: form.value.optimize_prompt,
+    optimize_prompt: false,
     n: form.value.n,
   }))
 
   form.value.prompt = ''
-  sceneFiles.value = []
-  sceneFileList.value = []
   productFile.value = null
   productFileList.value = []
 }
@@ -415,7 +401,7 @@ function scrollToBottom() {
 }
 
 onMounted(() => { fetchConversations(); fetchModelConfigs() })
-onUnmounted(() => { disconnectWs() })
+onUnmounted(() => { disconnectWs() /* disconnect all */ })
 </script>
 
 <style scoped>
@@ -481,6 +467,18 @@ onUnmounted(() => { disconnectWs() })
 .result-prompt { font-size: 14px; color: #303133; margin: 0 0 8px; line-height: 1.6; word-break: break-word; }
 .result-optimized { font-size: 13px; color: #606266; margin: 0 0 8px; line-height: 1.6; background: #f9fafc; padding: 8px 10px; border-radius: 6px; word-break: break-word; }
 .result-error { font-size: 13px; color: #f56c6c; margin: 0; }
+.result-error-block {
+  display: flex; align-items: flex-start; gap: 4px;
+  padding: 10px 12px; background: #fef0f0; border: 1px solid #fbc4c4;
+  border-radius: 6px; color: #f56c6c; font-size: 13px; line-height: 1.6;
+  word-break: break-word;
+}
+.result-error-detail {
+  display: flex; align-items: flex-start; gap: 4px;
+  padding: 6px 8px; background: #fef0f0; border-radius: 4px;
+  color: #f56c6c; font-size: 12px; line-height: 1.5;
+  word-break: break-word; margin-top: 4px;
+}
 .opt-label { font-size: 12px; color: #909399; font-weight: 500; }
 .result-thumb { max-width: 160px; max-height: 120px; border-radius: 6px; }
 .uploaded-images-row { display: flex; flex-wrap: wrap; gap: 8px; }
