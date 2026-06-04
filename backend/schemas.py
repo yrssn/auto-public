@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Any
 from datetime import datetime
 
 
@@ -71,8 +71,10 @@ class ImageTaskOut(BaseModel):
     role: str
     prompt: str
     uploaded_image: Optional[str] = None
+    uploaded_images: Optional[Any] = None
     optimized_prompt: Optional[str] = None
     result_image_url: Optional[str] = None
+    image_results: Optional[list] = None
     status: str
     error_msg: Optional[str] = None
     created_at: datetime
