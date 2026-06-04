@@ -59,6 +59,18 @@ def get_conversation(
     )
     if not conv:
         raise HTTPException(status_code=404, detail="会话不存在")
+
+    # Mark stale "generating" tasks as failed (page was refreshed during generation)
+    stale = db.query(ImageTask).filter(
+        ImageTask.conversation_id == conv_id,
+        ImageTask.status == "generating",
+    ).all()
+    for t in stale:
+        t.status = "failed"
+        t.error_msg = t.error_msg or "生成中断（页面刷新或连接断开）"
+    if stale:
+        db.commit()
+
     return conv
 
 
