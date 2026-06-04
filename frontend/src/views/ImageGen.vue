@@ -336,11 +336,16 @@ async function selectConv(id) {
 }
 
 async function handleNewConv() {
+  generating.value = false
+  progressMsg.value = ''
   try {
     const res = await conversationAPI.create()
     conversations.value.unshift(res.data)
     await selectConv(res.data.id)
-  } catch { ElMessage.error('创建会话失败') }
+  } catch (e) {
+    console.error('创建会话失败:', e)
+    ElMessage.error('创建会话失败: ' + (e?.response?.data?.detail || e?.message || '未知错误'))
+  }
 }
 
 async function handleDeleteConv(id) {

@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 import logging
 import os
 import uuid
@@ -28,13 +29,43 @@ def _get_image_mime(image_path: str) -> str:
 
 
 
-def _encode_image_or_url(path: str) -> str:
-    """Encode local file as data URL or return remote URL as-is."""
+def _encode_image_or_url(path: str, max_size: int = 1024) -> str:
+    """Encode local file as data URL or return remote URL as-is.
+    Local images are resized to max_size pixels on longest side to reduce payload."""
     if path.startswith("http"):
         return path
-    img_b64 = _encode_image(path)
-    img_mime = _get_image_mime(path)
-    return f"data:{img_mime};base64,{img_b64}"
+    # Try to compress image before encoding
+    try:
+        from PIL import Image
+        import io
+        img = Image.open(path)
+        # Convert RGBA to RGB for JPEG
+        if img.mode == "RGBA":
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[3])
+            img = bg
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+        # Resize if too large
+        w, h = img.size
+        if max(w, h) > max_size:
+            ratio = max_size / max(w, h)
+            img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+            logger.info(f"[ImageAPI] Resized {path} from {w}x{h} to {img.size}")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        return f"data:image/jpeg;base64,{img_b64}"
+    except ImportError:
+        # Pillow not available, fall back to raw base64
+        img_b64 = _encode_image(path)
+        img_mime = _get_image_mime(path)
+        return f"data:{img_mime};base64,{img_b64}"
+    except Exception as e:
+        logger.warning(f"[ImageAPI] Image compression failed, using raw: {e}")
+        img_b64 = _encode_image(path)
+        img_mime = _get_image_mime(path)
+        return f"data:{img_mime};base64,{img_b64}"
 
 
 async def call_image_api(
@@ -42,7 +73,7 @@ async def call_image_api(
     api_key: str,
     base_url: str,
     model_name: str,
-    size: str = "2048x2048",
+    size: str = "1024x1024",
     reference_image_paths: Optional[List[str]] = None,
     n: int = 1,
 ) -> str:
@@ -50,7 +81,8 @@ async def call_image_api(
     Supports optional reference images for image-to-image generation."""
     url = f"{base_url.rstrip('/')}/images/generations"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    body = {"model": model_name, "prompt": prompt, "n": n, "size": size, "response_format": "url"}
+    body = {"model": model_name, "prompt": prompt, "n": n, "size": size}
+    # Note: do NOT send response_format - many middleman APIs don't support it and may hang
 
     # Include reference images for img2img if available
     # Always send as array to match standard: "image": ["string", ...]
@@ -61,10 +93,11 @@ async def call_image_api(
         except Exception as e:
             logger.warning(f"[ImageAPI] Failed to encode ref images, text2img fallback: {e}")
 
-    logger.info(f"[ImageAPI] Request: url={url}, model={model_name}, has_image={bool(reference_image_paths)}, size={size}")
+    body_size = len(json.dumps(body, ensure_ascii=False))
+    logger.info(f"[ImageAPI] Request: url={url}, model={model_name}, has_image={bool(reference_image_paths)}, size={size}, body_size={body_size}")
 
     try:
-        async with httpx.AsyncClient(timeout=600) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=600, write=60, pool=30)) as client:
             resp = await client.post(url, json=body, headers=headers)
     except httpx.RemoteProtocolError as e:
         raise ValueError(f"服务端断开连接（可能是请求体过大或模型不支持图片输入）: {e}")
@@ -84,14 +117,19 @@ async def call_image_api(
             err_detail = resp.text
         raise ValueError(f"API {resp.status_code}: {err_detail}")
     data = resp.json()
-    # OpenAI format: {"data": [{"url": "..."}]}
-    images = data.get("data", [])
+    logger.info(f"[ImageAPI] Response keys={list(data.keys())}, preview={str(data)[:500]}")
+
+    # Support multiple API response formats
+    images = data.get("data") or data.get("images") or data.get("results") or []
+    # Some APIs return single image directly at top level
+    if not images and (data.get("url") or data.get("b64_json") or data.get("image_url")):
+        images = [data]
     if not images:
-        raise ValueError(f"图片生成 API 未返回图片数据, 响应: {data}")
+        raise ValueError(f"图片生成 API 未返回图片数据, 响应: {str(data)[:1000]}")
 
     def _resolve_image(img_data: dict) -> str:
         """Return URL; if b64_json, save to file and return file path."""
-        url = img_data.get("url")
+        url = img_data.get("url") or img_data.get("image_url")
         if url:
             return url
         b64 = img_data.get("b64_json")
