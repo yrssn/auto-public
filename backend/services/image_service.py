@@ -12,6 +12,14 @@ logger = logging.getLogger(__name__)
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# Instruction appended to the prompt to stop chat-style relay image models
+# (e.g. gpt-image-* proxies) from packing several variations into one collage.
+SINGLE_IMAGE_HINT = (
+    " Generate exactly one single standalone image. "
+    "Do not produce a grid, collage, montage, contact sheet, "
+    "or multiple panels/variations within one image."
+)
+
 
 
 
@@ -75,13 +83,20 @@ async def call_image_api(
     model_name: str,
     size: str = "1024x1024",
     reference_image_paths: Optional[List[str]] = None,
-    n: int = 1,
+    single_image_hint: bool = True,
 ) -> str:
     """Call OpenAI-compatible image generation API. Returns image URL(s).
-    Supports optional reference images for image-to-image generation."""
+    Supports optional reference images for image-to-image generation.
+
+    Always request a single image per call (n=1). Relay/proxy image models are
+    chat-style backends that ignore n>1 and instead return ONE collage/nine-grid
+    image; callers that want multiple images should issue multiple calls."""
     url = f"{base_url.rstrip('/')}/images/generations"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    body = {"model": model_name, "prompt": prompt, "n": n, "size": size}
+    final_prompt = prompt
+    if single_image_hint and SINGLE_IMAGE_HINT.strip() not in prompt:
+        final_prompt = f"{prompt}{SINGLE_IMAGE_HINT}"
+    body = {"model": model_name, "prompt": final_prompt, "n": 1, "size": size}
     # Note: do NOT send response_format - many middleman APIs don't support it and may hang
 
     # Include reference images for img2img if available
@@ -144,28 +159,38 @@ async def call_image_api(
             return f"/uploads/{filename}"
         raise ValueError(f"图片生成 API 未返回 url 或 b64_json, 响应: {img_data}")
 
-    if n == 1:
-        return _resolve_image(images[0])
-    return [_resolve_image(img) for img in images]
+    # Each call requests a single image, so return the first one.
+    return _resolve_image(images[0])
 
 
 async def _generate_one(prompt: str, cfg: dict, image_paths: Optional[List[str]], n: int = 1) -> list:
-    """Generate image(s) with a single model, return list of result dicts."""
+    """Generate n image(s) with a single model, return list of result dicts.
+
+    Issues n independent single-image requests (concurrently) instead of one
+    request with n>1. Relay/proxy image models collapse an n>1 request into a
+    single collage/nine-grid image, so one request per image is what reliably
+    yields n distinct standalone images."""
     name = cfg.get("config_name", cfg["model_name"])
-    try:
-        result = await call_image_api(
+    count = max(1, int(n or 1))
+
+    async def _single():
+        url = await call_image_api(
             prompt=prompt,
             api_key=cfg["api_key"],
             base_url=cfg["base_url"],
             model_name=cfg["model_name"],
             reference_image_paths=image_paths if image_paths else None,
-            n=n,
         )
-        if isinstance(result, list):
-            return [{"model_name": name, "image_url": url, "error": None} for url in result]
-        return [{"model_name": name, "image_url": result, "error": None}]
-    except Exception as e:
-        return [{"model_name": name, "image_url": None, "error": str(e)}]
+        return {"model_name": name, "image_url": url, "error": None}
+
+    results = await asyncio.gather(*[_single() for _ in range(count)], return_exceptions=True)
+    out = []
+    for r in results:
+        if isinstance(r, Exception):
+            out.append({"model_name": name, "image_url": None, "error": str(r)})
+        else:
+            out.append(r)
+    return out
 
 
 async def generate_image_stream(
