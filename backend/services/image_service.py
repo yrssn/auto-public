@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import os
+import time
 import uuid
 import httpx
 from typing import Optional, List
@@ -11,6 +12,24 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Persist every relay image API call (request params + response info) to a log
+# file so generations can be traced back later. Module loggers don't emit by
+# default under uvicorn, so attach our own file + console handlers here.
+LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+IMAGE_API_LOG = os.path.join(LOG_DIR, "image_api.log")
+
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    _file_handler = logging.FileHandler(IMAGE_API_LOG, encoding="utf-8")
+    _file_handler.setFormatter(_fmt)
+    _stream_handler = logging.StreamHandler()
+    _stream_handler.setFormatter(_fmt)
+    logger.addHandler(_file_handler)
+    logger.addHandler(_stream_handler)
+    logger.propagate = False
 
 # Instruction appended to the prompt to stop chat-style relay image models
 # (e.g. gpt-image-* proxies) from packing several variations into one collage.
@@ -96,6 +115,7 @@ async def call_image_api(
     Always request a single image per call (n=1). Relay/proxy image models are
     chat-style backends that ignore n>1 and instead return ONE collage/nine-grid
     image; callers that want multiple images should issue multiple calls."""
+    req_id = uuid.uuid4().hex[:8]
     url = f"{base_url.rstrip('/')}/images/generations"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     final_prompt = prompt
@@ -109,35 +129,46 @@ async def call_image_api(
     if reference_image_paths:
         try:
             body["image"] = [_encode_image_or_url(p) for p in reference_image_paths]
-            logger.info(f"[ImageAPI] img2img mode, {len(reference_image_paths)} ref image(s), model={model_name}")
+            logger.info(f"[ImageAPI][{req_id}] img2img mode, {len(reference_image_paths)} ref image(s), model={model_name}")
         except Exception as e:
-            logger.warning(f"[ImageAPI] Failed to encode ref images, text2img fallback: {e}")
+            logger.warning(f"[ImageAPI][{req_id}] Failed to encode ref images, text2img fallback: {e}")
 
     body_size = len(json.dumps(body, ensure_ascii=False))
-    logger.info(f"[ImageAPI] Request: url={url}, model={model_name}, has_image={bool(reference_image_paths)}, size={size}, body_size={body_size}")
+    prompt_preview = final_prompt[:200].replace("\n", " ")
+    logger.info(
+        f"[ImageAPI][{req_id}] -> POST {url} | model={model_name} size={size} n=1 "
+        f"img2img={bool(reference_image_paths)} body_size={body_size} prompt='{prompt_preview}'"
+    )
 
+    start = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=600, write=60, pool=30)) as client:
             resp = await client.post(url, json=body, headers=headers)
     except httpx.RemoteProtocolError as e:
+        logger.error(f"[ImageAPI][{req_id}] connection broken: {e}")
         raise ValueError(f"服务端断开连接（可能是请求体过大或模型不支持图片输入）: {e}")
     except httpx.ReadTimeout:
+        logger.error(f"[ImageAPI][{req_id}] read timeout after 600s")
         raise ValueError(f"请求超时（600秒），模型处理时间过长")
     except httpx.ConnectError as e:
+        logger.error(f"[ImageAPI][{req_id}] connect error: {e}")
         raise ValueError(f"连接失败，请检查 base_url 是否正确: {e}")
     except httpx.HTTPStatusError as e:
+        logger.error(f"[ImageAPI][{req_id}] http status error: {e}")
         raise ValueError(f"HTTP 错误: {e}")
 
-    logger.info(f"[ImageAPI] Response status={resp.status_code}")
+    elapsed = time.monotonic() - start
+    logger.info(f"[ImageAPI][{req_id}] <- status={resp.status_code} in {elapsed:.1f}s")
 
     if resp.status_code >= 400:
         try:
             err_detail = resp.json()
         except Exception:
             err_detail = resp.text
+        logger.error(f"[ImageAPI][{req_id}] API error {resp.status_code}: {str(err_detail)[:800]}")
         raise ValueError(f"API {resp.status_code}: {err_detail}")
     data = resp.json()
-    logger.info(f"[ImageAPI] Response keys={list(data.keys())}, preview={str(data)[:500]}")
+    logger.info(f"[ImageAPI][{req_id}] response keys={list(data.keys())}, preview={str(data)[:800]}")
 
     # Support multiple API response formats
     images = data.get("data") or data.get("images") or data.get("results") or []
@@ -160,12 +191,14 @@ async def call_image_api(
             filepath = os.path.join(UPLOAD_DIR, filename)
             with open(filepath, "wb") as f:
                 f.write(img_bytes)
-            logger.info(f"[ImageAPI] Saved b64_json to file: {filename} ({len(img_bytes)} bytes)")
+            logger.info(f"[ImageAPI][{req_id}] Saved b64_json to file: {filename} ({len(img_bytes)} bytes)")
             return f"/uploads/{filename}"
         raise ValueError(f"图片生成 API 未返回 url 或 b64_json, 响应: {img_data}")
 
     # Each call requests a single image, so return the first one.
-    return _resolve_image(images[0])
+    result_url = _resolve_image(images[0])
+    logger.info(f"[ImageAPI][{req_id}] done -> image={result_url}")
+    return result_url
 
 
 async def _generate_one(prompt: str, cfg: dict, image_paths: Optional[List[str]], n: int = 1) -> list:
@@ -177,6 +210,7 @@ async def _generate_one(prompt: str, cfg: dict, image_paths: Optional[List[str]]
     yields n distinct standalone images. n is clamped to MAX_IMAGES_PER_REQUEST."""
     name = cfg.get("config_name", cfg["model_name"])
     count = min(max(1, int(n or 1)), MAX_IMAGES_PER_REQUEST)
+    logger.info(f"[ImageAPI] _generate_one: model={name} requested_n={n} -> issuing {count} independent n=1 call(s)")
 
     async def _single():
         url = await call_image_api(
@@ -192,9 +226,12 @@ async def _generate_one(prompt: str, cfg: dict, image_paths: Optional[List[str]]
     out = []
     for r in results:
         if isinstance(r, Exception):
+            logger.error(f"[ImageAPI] _generate_one: model={name} one image failed: {r}")
             out.append({"model_name": name, "image_url": None, "error": str(r)})
         else:
             out.append(r)
+    ok = sum(1 for o in out if o.get("image_url"))
+    logger.info(f"[ImageAPI] _generate_one done: model={name} {ok}/{count} image(s) succeeded")
     return out
 
 

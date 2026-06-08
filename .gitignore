@@ -5,3 +5,7 @@ __pycache__/
 *.pyc
 dist/
 .DS_Store
+/backend/logs/
+/backend/uploads/
+/backend/.venv/
+/backend/*.db
