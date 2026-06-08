@@ -119,16 +119,38 @@ async def expand_prompts(
     url = f"{text_cfg['base_url'].rstrip('/')}/chat/completions"
     model_name = text_cfg["model_name"]
     ref_note = (
-        "保持与用户提供的参考产品图一致（同一件商品/同一主体），" if has_reference else ""
+        "用户还提供了一张参考产品图，N 个提示词必须全部基于这同一件实拍商品（同一主体），"
+        "不得替换成其它款式或颜色。"
+        if has_reference
+        else ""
     )
+    # The user wants N images to form ONE cohesive set (一套) of the SAME single
+    # product, decomposed into N complementary sections/shots — NOT N independent
+    # full pages of different products. So we (1) lock a single product identity
+    # that every sub-prompt must repeat, and (2) split the set into N distinct
+    # sections that progress KV主图 → 卖点 → 细节 → 场景.
     system_prompt = (
-        "你是电商视觉提示词专家。根据用户的原始描述，生成 N 个【各有侧重、互补不重复】"
-        "的图片生成提示词，每个聚焦不同方面（例如：KV主图、卖点说明、细节特写、场景/穿搭展示等）。"
+        "你是电商详情页视觉策划＋提示词专家。用户会给你【一套】商品图的整体描述，"
+        f"以及需要的张数 N={n}。你的任务是把这一套图拆解成 N 个互补的「章节/分镜」提示词，"
+        "让这 N 张图合起来构成同一套、同一件商品的完整视觉物料。\n"
+        "硬性规则：\n"
+        "1) 一致性最重要：N 张必须是【同一件商品】——同款式、同颜色、同面料、同一位模特、"
+        "同一种色调与画面风格。先从原始描述中提炼该商品的核心固定属性（品类/颜色/材质/廓形/"
+        "模特与风格/色调/尺寸），并把这组固定属性【原样写进每一个提示词】，确保不串成不同的衣服。\n"
         f"{ref_note}"
-        "每个提示词都要自包含、具体、可直接喂给图片生成模型，并保留原描述的语言、风格、尺寸等要求。"
-        "严格只输出一个 JSON 数组（形如 [\"prompt1\", \"prompt2\"]），不要输出任何额外文字或 markdown。"
+        "2) 互补不重复：按 N 把这套图拆成不同章节，每个提示词只聚焦【一个】章节/视角，"
+        "覆盖顺序优先级为 KV主图(整体正面主视觉) → 卖点说明 → 细节特写(领口/版型/面料等) → "
+        "场景/穿搭展示(日常生活场景)。N=2 时取『KV主图整体』+『场景穿搭或细节』；"
+        "N=4 时分别为 KV主图 / 卖点 / 细节特写 / 场景展示；其它 N 同理按此优先级取前 N 个互补章节。\n"
+        "3) 每个提示词都要自包含、具体、可直接喂给图片生成模型，并保留原描述的语言"
+        "（原文是日语就用日语）、风格、800×800 等尺寸要求。\n"
+        "4) 严格只输出一个 JSON 数组（形如 [\"prompt1\", \"prompt2\"]），数组长度正好为 N，"
+        "不要输出任何额外文字、解释或 markdown。"
     )
-    user_prompt = f"原始描述：\n{base_prompt}\n\n请生成 {n} 个互补的提示词。"
+    user_prompt = (
+        f"这一套商品图的整体描述如下：\n{base_prompt}\n\n"
+        f"请把它拆解成正好 {n} 个互补章节的提示词，要求是【同一件商品】的不同分镜，合起来是一套。"
+    )
     body = {
         "model": model_name,
         "messages": [
@@ -367,8 +389,21 @@ async def generate_image_stream(
         # When more than one image is requested, use the chat model to expand the
         # single description into N distinct, complementary prompts (one per image).
         if count > 1 and text_config:
-            yield {"step": "expanding", "message": f"正在用文字模型 {text_config.get('config_name', text_config['model_name'])} 优化生成 {count} 个提示词…"}
+            yield {"step": "expanding", "message": f"正在用文字模型 {text_config.get('config_name', text_config['model_name'])} 拆解为 {count} 个章节提示词…"}
             prompts = await expand_prompts(prompt, count, text_config, has_reference=bool(image_paths))
+            # expand_prompts falls back to [prompt]*count on any failure (bad key,
+            # network, unparseable output). Detect that and warn the user instead of
+            # silently degrading into N identical full-page images.
+            if len({p for p in prompts}) <= 1:
+                model_label = text_config.get("config_name", text_config["model_name"])
+                warn = (
+                    f"⚠ 文字模型 {model_label} 拆解失败（可能是 API Key / 接口地址无效），"
+                    f"已回退为用同一描述生成 {count} 张，内容可能相近。请检查模型配置。"
+                )
+                # Persist on the task so the warning survives reload, not just a
+                # transient progress message the user might miss.
+                result["optimized_prompt"] = warn
+                yield {"step": "expand_failed", "message": warn, "optimized_prompt": warn}
         else:
             prompts = [prompt] * count
         # Surface the per-image prompts so the user can see/trace what was generated.

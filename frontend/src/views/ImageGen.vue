@@ -192,6 +192,11 @@ const wsConnected = ref(false)
 // Map of convId -> WebSocket, supports multiple concurrent WS connections
 const wsMap = new Map()
 let activeWs = null
+// Fallback poller: when a tab is backgrounded the WS that started a generation
+// is torn down, and a freshly reconnected WS never receives that task's final
+// `task_updated`. Polling the conversation REST endpoint re-syncs the final
+// state so the UI doesn't stay stuck on "生成中".
+let pollTimer = null
 
 const statusMap = {
   pending: { label: '等待中', type: 'info' },
@@ -290,6 +295,8 @@ function handleWsMessage(msg, convId) {
       } else {
         tasks.value.push(msg.task)
       }
+      // WS delivered the final state; the fallback poller is no longer needed.
+      if (!tasks.value.some(t => t.status === 'generating')) stopPolling()
       nextTick(scrollToBottom)
     }
     fetchConversations()
@@ -314,8 +321,33 @@ async function fetchModelConfigs() {
   } catch {}
 }
 
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+}
+
+// Poll the conversation until no task is still "generating", then clear the
+// in-progress UI. Used as a fallback for results that completed while the tab
+// was backgrounded (the WS that started them is gone, so no `task_updated`).
+function startPolling(convId) {
+  stopPolling()
+  pollTimer = setInterval(async () => {
+    if (activeConvId.value !== convId) { stopPolling(); return }
+    try {
+      const fresh = (await conversationAPI.get(convId)).data.tasks || []
+      if (activeConvId.value !== convId) { stopPolling(); return }
+      tasks.value = fresh
+      if (!fresh.some(t => t.status === 'generating')) {
+        generating.value = false
+        progressMsg.value = ''
+        stopPolling()
+      }
+    } catch { /* keep polling; transient errors are fine */ }
+  }, 3000)
+}
+
 async function selectConv(id) {
   activeConvId.value = id
+  stopPolling()
   try {
     tasks.value = (await conversationAPI.get(id)).data.tasks || []
     await nextTick()
@@ -330,6 +362,9 @@ async function selectConv(id) {
   if (hasGenerating) {
     generating.value = true
     progressMsg.value = '生成中...'
+    // The originating WS may be gone (tab was backgrounded); poll for the final
+    // state so the UI doesn't stay stuck on "生成中".
+    startPolling(id)
   } else {
     progressMsg.value = ''
     generating.value = false
@@ -356,6 +391,7 @@ async function handleDeleteConv(id) {
     if (activeConvId.value === id) {
       activeConvId.value = null
       tasks.value = []
+      stopPolling()
       disconnectWs(id)
     } else {
       disconnectWs(id)
@@ -413,7 +449,7 @@ function scrollToBottom() {
 }
 
 onMounted(() => { fetchConversations(); fetchModelConfigs() })
-onUnmounted(() => { disconnectWs() /* disconnect all */ })
+onUnmounted(() => { stopPolling(); disconnectWs() /* disconnect all */ })
 </script>
 
 <style scoped>
