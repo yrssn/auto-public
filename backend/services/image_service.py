@@ -20,6 +20,11 @@ SINGLE_IMAGE_HINT = (
     "or multiple panels/variations within one image."
 )
 
+# Upper bound on images generated per model in one request. Each image is an
+# independent outbound HTTP call, so cap the user-controlled n to avoid spawning
+# an unbounded number of concurrent requests (the UI only offers 1/2/4).
+MAX_IMAGES_PER_REQUEST = 10
+
 
 
 
@@ -169,9 +174,9 @@ async def _generate_one(prompt: str, cfg: dict, image_paths: Optional[List[str]]
     Issues n independent single-image requests (concurrently) instead of one
     request with n>1. Relay/proxy image models collapse an n>1 request into a
     single collage/nine-grid image, so one request per image is what reliably
-    yields n distinct standalone images."""
+    yields n distinct standalone images. n is clamped to MAX_IMAGES_PER_REQUEST."""
     name = cfg.get("config_name", cfg["model_name"])
-    count = max(1, int(n or 1))
+    count = min(max(1, int(n or 1)), MAX_IMAGES_PER_REQUEST)
 
     async def _single():
         url = await call_image_api(
