@@ -171,6 +171,20 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                 for m in image_models
             ]
 
+            # Resolve a chat/text model used to expand one description into N
+            # distinct prompts when multiple images are requested. Prefer the
+            # user's default chat model, else the first chat model they have.
+            text_cfg = None
+            chat_models = db.query(ModelConfig).filter(
+                ModelConfig.owner_id == user_id, ModelConfig.model_type == "chat"
+            ).all()
+            if chat_models:
+                chosen = next((m for m in chat_models if m.is_default), chat_models[0])
+                text_cfg = {
+                    "api_key": chosen.api_key, "base_url": chosen.base_url,
+                    "model_name": chosen.model_name, "config_name": chosen.name,
+                }
+
             # Auto-set title
             existing = db.query(ImageTask).filter(ImageTask.conversation_id == conv_id).count()
             if existing == 0:
@@ -240,6 +254,7 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                     product_path=product_path,
                     image_configs=image_cfgs if image_cfgs else None,
                     n=n_images,
+                    text_config=text_cfg,
                 ):
                     # Try to send progress via WS (ignore if disconnected)
                     try:

@@ -1,3 +1,5 @@
+import json
+
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
@@ -66,3 +68,23 @@ class ImageTask(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     conversation = relationship("Conversation", back_populates="tasks")
+
+    @property
+    def image_results(self):
+        """Parsed multi-image results, so reloaded tasks expose the full list
+        (not just result_image_url). Mirrors the live WebSocket payload."""
+        if self.image_results_json:
+            try:
+                return json.loads(self.image_results_json)
+            except (json.JSONDecodeError, TypeError):
+                return None
+        return None
+
+    @property
+    def uploaded_images(self):
+        if self.uploaded_images_json:
+            try:
+                return json.loads(self.uploaded_images_json)
+            except (json.JSONDecodeError, TypeError):
+                return None
+        return None

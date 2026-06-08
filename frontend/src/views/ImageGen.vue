@@ -73,7 +73,7 @@
                 <!-- Multi-model results -->
                 <div v-if="task.image_results?.length" class="multi-image-grid">
                   <div v-for="(img, i) in task.image_results" :key="i" class="multi-image-card">
-                    <div class="multi-image-model">{{ img.model_name }}</div>
+                    <div class="multi-image-model">{{ img.model_name }}<span v-if="task.image_results.length > 1"> · 第 {{ i + 1 }} 张</span></div>
                     <el-image
                       v-if="img.image_url"
                       :src="img.image_url"
@@ -82,6 +82,7 @@
                       class="result-thumb-lg"
                       fit="contain"
                     />
+                    <div v-if="img.prompt && task.image_results.length > 1" class="multi-image-prompt" :title="img.prompt">{{ img.prompt }}</div>
                     <div v-if="img.error" class="result-error-detail">
                       <el-icon style="color: #f56c6c; margin-right: 4px"><WarningFilled /></el-icon>
                       <span>{{ img.error }}</span>
@@ -518,6 +519,18 @@ onUnmounted(() => { disconnectWs() /* disconnect all */ })
   color: #409eff;
   margin-bottom: 6px;
   text-align: center;
+}
+.multi-image-prompt {
+  font-size: 11px;
+  color: #909399;
+  margin-top: 6px;
+  line-height: 1.5;
+  max-height: 4.5em;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
 }
 
 /* ---- Progress ---- */

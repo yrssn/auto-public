@@ -100,6 +100,105 @@ def _encode_image_or_url(path: str, max_size: int = 1024) -> str:
         return f"data:{img_mime};base64,{img_b64}"
 
 
+async def expand_prompts(
+    base_prompt: str,
+    n: int,
+    text_cfg: dict,
+    has_reference: bool = False,
+) -> List[str]:
+    """Use a chat/LLM model to expand one description into n distinct, complementary
+    image-generation prompts (e.g. KV主图 / 卖点 / 细节 / 场景 for a 详情页).
+
+    Returns a list of exactly n prompt strings. On any failure, falls back to
+    repeating base_prompt n times so generation never breaks because of this step."""
+    fallback = [base_prompt] * n
+    if n <= 1 or not text_cfg:
+        return fallback
+
+    req_id = uuid.uuid4().hex[:8]
+    url = f"{text_cfg['base_url'].rstrip('/')}/chat/completions"
+    model_name = text_cfg["model_name"]
+    ref_note = (
+        "保持与用户提供的参考产品图一致（同一件商品/同一主体），" if has_reference else ""
+    )
+    system_prompt = (
+        "你是电商视觉提示词专家。根据用户的原始描述，生成 N 个【各有侧重、互补不重复】"
+        "的图片生成提示词，每个聚焦不同方面（例如：KV主图、卖点说明、细节特写、场景/穿搭展示等）。"
+        f"{ref_note}"
+        "每个提示词都要自包含、具体、可直接喂给图片生成模型，并保留原描述的语言、风格、尺寸等要求。"
+        "严格只输出一个 JSON 数组（形如 [\"prompt1\", \"prompt2\"]），不要输出任何额外文字或 markdown。"
+    )
+    user_prompt = f"原始描述：\n{base_prompt}\n\n请生成 {n} 个互补的提示词。"
+    body = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.8,
+    }
+    headers = {"Authorization": f"Bearer {text_cfg['api_key']}", "Content-Type": "application/json"}
+    logger.info(
+        f"[ImageAPI][{req_id}] expand_prompts -> POST {url} | text_model={model_name} "
+        f"n={n} base_prompt='{base_prompt[:120].replace(chr(10), ' ')}'"
+    )
+    start = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=120, write=30, pool=30)) as client:
+            resp = await client.post(url, json=body, headers=headers)
+        elapsed = time.monotonic() - start
+        logger.info(f"[ImageAPI][{req_id}] expand_prompts <- status={resp.status_code} in {elapsed:.1f}s")
+        if resp.status_code >= 400:
+            logger.error(f"[ImageAPI][{req_id}] expand_prompts API error {resp.status_code}: {resp.text[:500]}")
+            return fallback
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.error(f"[ImageAPI][{req_id}] expand_prompts failed, falling back to base prompt: {e}")
+        return fallback
+
+    prompts = _parse_prompt_list(content)
+    if not prompts:
+        logger.error(f"[ImageAPI][{req_id}] expand_prompts could not parse model output, falling back. raw={content[:500]}")
+        return fallback
+
+    # Normalize to exactly n prompts (pad with base_prompt, truncate extras).
+    if len(prompts) < n:
+        prompts = prompts + [base_prompt] * (n - len(prompts))
+    prompts = prompts[:n]
+    for i, p in enumerate(prompts):
+        logger.info(f"[ImageAPI][{req_id}] expand_prompts result[{i}]='{p[:160].replace(chr(10), ' ')}'")
+    return prompts
+
+
+def _parse_prompt_list(content: str) -> List[str]:
+    """Best-effort parse of an LLM response into a list of prompt strings.
+    Handles raw JSON arrays, ```json fenced blocks, and falls back to line splitting."""
+    text = content.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    # Try to locate a JSON array inside the text.
+    lb, rb = text.find("["), text.rfind("]")
+    if lb != -1 and rb != -1 and rb > lb:
+        try:
+            arr = json.loads(text[lb:rb + 1])
+            items = [str(x).strip() for x in arr if str(x).strip()]
+            if items:
+                return items
+        except (json.JSONDecodeError, TypeError):
+            pass
+    # Fallback: split non-empty lines, stripping list markers.
+    lines = []
+    for ln in text.splitlines():
+        s = ln.strip().lstrip("-*0123456789.、) ").strip()
+        if s:
+            lines.append(s)
+    return lines
+
+
 async def call_image_api(
     prompt: str,
     api_key: str,
@@ -201,33 +300,42 @@ async def call_image_api(
     return result_url
 
 
-async def _generate_one(prompt: str, cfg: dict, image_paths: Optional[List[str]], n: int = 1) -> list:
-    """Generate n image(s) with a single model, return list of result dicts.
+async def _generate_one(prompts: List[str], cfg: dict, image_paths: Optional[List[str]]) -> list:
+    """Generate one image per prompt with a single model, return list of result dicts.
 
-    Issues n independent single-image requests (concurrently) instead of one
-    request with n>1. Relay/proxy image models collapse an n>1 request into a
-    single collage/nine-grid image, so one request per image is what reliably
-    yields n distinct standalone images. n is clamped to MAX_IMAGES_PER_REQUEST."""
+    Issues len(prompts) independent single-image requests (concurrently) instead of
+    one request with n>1. Relay/proxy image models collapse an n>1 request into a
+    single collage/nine-grid image, so one request per image is what reliably yields
+    distinct standalone images. Each call uses its own (possibly distinct) prompt, so
+    selecting N images yields N images from N complementary prompts. The number of
+    prompts is clamped to MAX_IMAGES_PER_REQUEST."""
     name = cfg.get("config_name", cfg["model_name"])
-    count = min(max(1, int(n or 1)), MAX_IMAGES_PER_REQUEST)
-    logger.info(f"[ImageAPI] _generate_one: model={name} requested_n={n} -> issuing {count} independent n=1 call(s)")
+    prompts = prompts[:MAX_IMAGES_PER_REQUEST] or [""]
+    count = len(prompts)
+    distinct = len({p for p in prompts})
+    logger.info(
+        f"[ImageAPI] _generate_one: model={name} -> issuing {count} independent n=1 call(s) "
+        f"({distinct} distinct prompt(s))"
+    )
 
-    async def _single():
+    async def _single(idx: int, p: str):
         url = await call_image_api(
-            prompt=prompt,
+            prompt=p,
             api_key=cfg["api_key"],
             base_url=cfg["base_url"],
             model_name=cfg["model_name"],
             reference_image_paths=image_paths if image_paths else None,
         )
-        return {"model_name": name, "image_url": url, "error": None}
+        return {"model_name": name, "image_url": url, "error": None, "prompt": p, "index": idx}
 
-    results = await asyncio.gather(*[_single() for _ in range(count)], return_exceptions=True)
+    results = await asyncio.gather(
+        *[_single(i, p) for i, p in enumerate(prompts)], return_exceptions=True
+    )
     out = []
-    for r in results:
+    for i, r in enumerate(results):
         if isinstance(r, Exception):
-            logger.error(f"[ImageAPI] _generate_one: model={name} one image failed: {r}")
-            out.append({"model_name": name, "image_url": None, "error": str(r)})
+            logger.error(f"[ImageAPI] _generate_one: model={name} image #{i} failed: {r}")
+            out.append({"model_name": name, "image_url": None, "error": str(r), "prompt": prompts[i], "index": i})
         else:
             out.append(r)
     ok = sum(1 for o in out if o.get("image_url"))
@@ -240,10 +348,13 @@ async def generate_image_stream(
     product_path: Optional[str],
     image_configs: Optional[List[dict]] = None,
     n: int = 1,
+    text_config: Optional[dict] = None,
 ):
     """
     Async generator that yields status dicts during image generation.
     image_configs: list of {"api_key", "base_url", "model_name", "config_name"} for image generation
+    text_config: optional {"api_key", "base_url", "model_name", "config_name"} chat model used,
+                 when n>1, to expand the description into n distinct complementary prompts.
     product_path: product image path (for img2img)
     """
     result = {"optimized_prompt": None, "image_url": None, "image_results": []}
@@ -252,11 +363,24 @@ async def generate_image_stream(
 
     # Generate images (supports multiple models in parallel)
     if image_configs:
+        count = min(max(1, int(n or 1)), MAX_IMAGES_PER_REQUEST)
+        # When more than one image is requested, use the chat model to expand the
+        # single description into N distinct, complementary prompts (one per image).
+        if count > 1 and text_config:
+            yield {"step": "expanding", "message": f"正在用文字模型 {text_config.get('config_name', text_config['model_name'])} 优化生成 {count} 个提示词…"}
+            prompts = await expand_prompts(prompt, count, text_config, has_reference=bool(image_paths))
+        else:
+            prompts = [prompt] * count
+        # Surface the per-image prompts so the user can see/trace what was generated.
+        if len({p for p in prompts}) > 1:
+            result["optimized_prompt"] = "\n".join(f"{i+1}. {p}" for i, p in enumerate(prompts))
+            yield {"step": "prompts_ready", "message": "提示词已生成", "optimized_prompt": result["optimized_prompt"]}
+
         model_names = [c.get("config_name", c["model_name"]) for c in image_configs]
         yield {"step": "generating", "message": f"正在用 {len(image_configs)} 个模型并行生成图片: {', '.join(model_names)}"}
 
         # Run all models in parallel (pass product image for img2img)
-        tasks = [_generate_one(prompt, cfg, image_paths, n=n) for cfg in image_configs]
+        tasks = [_generate_one(prompts, cfg, image_paths) for cfg in image_configs]
         nested_results = await asyncio.gather(*tasks)
         # Flatten: each model may return multiple images
         image_results = [r for model_results in nested_results for r in model_results]
