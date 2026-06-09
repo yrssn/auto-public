@@ -343,51 +343,50 @@ async def call_image_api(
 
 
 async def _generate_one(
-    prompt: str,
+    prompts: List[str],
     cfg: dict,
     image_paths: Optional[List[str]],
-    n: int = 1,
     quality: str = "auto",
     size: str = "auto",
 ) -> list:
-    """Generate n images with a single model, return list of result dicts.
+    """Generate one image per prompt with a single model, SEQUENTIALLY.
 
-    Issues n independent n=1 API calls concurrently, all using the SAME prompt.
-    This ensures each image is a standalone picture (not a collage/composite),
-    while using the same prompt maintains style/subject consistency across images.
+    Issues len(prompts) independent n=1 API calls one at a time (not parallel).
+    Sequential execution avoids overwhelming relay APIs and stops early on failure
+    to prevent wasting money on calls that will also fail.
 
-    Relay APIs often merge n>1 into a single composite image, so separate n=1
-    calls are the reliable way to get truly separate images."""
+    Each call uses its own prompt (from expand_prompts) but the same reference
+    images, ensuring the images form a coherent set."""
     name = cfg.get("config_name", cfg["model_name"])
-    count = min(max(1, n), MAX_IMAGES_PER_REQUEST)
+    prompts = prompts[:MAX_IMAGES_PER_REQUEST] or [""]
+    count = len(prompts)
     logger.info(
-        f"[ImageAPI] _generate_one: model={name} -> issuing {count} independent n=1 call(s) "
-        f"(same prompt) quality={quality} size={size}"
+        f"[ImageAPI] _generate_one: model={name} -> {count} sequential n=1 call(s) "
+        f"quality={quality} size={size}"
     )
 
-    async def _single(idx: int):
-        urls = await call_image_api(
-            prompt=prompt,
-            api_key=cfg["api_key"],
-            base_url=cfg["base_url"],
-            model_name=cfg["model_name"],
-            size=size,
-            reference_image_paths=image_paths if image_paths else None,
-            quality=quality,
-            n=1,
-        )
-        return {"model_name": name, "image_url": urls[0] if urls else None, "error": None, "prompt": prompt, "index": idx}
-
-    results = await asyncio.gather(
-        *[_single(i) for i in range(count)], return_exceptions=True
-    )
     out = []
-    for i, r in enumerate(results):
-        if isinstance(r, Exception):
-            logger.error(f"[ImageAPI] _generate_one: model={name} image #{i} failed: {r}")
-            out.append({"model_name": name, "image_url": None, "error": str(r), "prompt": prompt, "index": i})
-        else:
-            out.append(r)
+    for idx, p in enumerate(prompts):
+        try:
+            urls = await call_image_api(
+                prompt=p,
+                api_key=cfg["api_key"],
+                base_url=cfg["base_url"],
+                model_name=cfg["model_name"],
+                size=size,
+                reference_image_paths=image_paths if image_paths else None,
+                quality=quality,
+                n=1,
+            )
+            out.append({"model_name": name, "image_url": urls[0] if urls else None, "error": None, "prompt": p, "index": idx})
+            logger.info(f"[ImageAPI] _generate_one: model={name} image #{idx+1}/{count} OK")
+        except Exception as e:
+            logger.error(f"[ImageAPI] _generate_one: model={name} image #{idx+1}/{count} failed: {e}")
+            out.append({"model_name": name, "image_url": None, "error": str(e), "prompt": p, "index": idx})
+            # Stop early on failure to avoid wasting money
+            logger.warning(f"[ImageAPI] _generate_one: stopping early after failure on image #{idx+1}")
+            break
+
     ok = sum(1 for o in out if o.get("image_url"))
     logger.info(f"[ImageAPI] _generate_one done: model={name} {ok}/{count} image(s) succeeded")
     return out
@@ -406,9 +405,9 @@ async def generate_image_stream(
     Async generator that yields status dicts during image generation.
     image_configs: list of {"api_key", "base_url", "model_name", "config_name"} for image generation
     text_config: optional {"api_key", "base_url", "model_name", "config_name"} chat model used
-                 (currently unused - kept for future prompt optimization features)
+                 to expand the description into n complementary sub-prompts (KV/卖点/细节/场景)
     product_paths: list of product image paths (for img2img, supports multiple reference images)
-    n: number of images to generate per model in ONE API call (ensures consistency)
+    n: number of images to generate (each as a separate n=1 call, sequentially)
     quality: 'low' | 'medium' | 'high' | 'auto' (gpt-image-2 quality setting)
     size: image size e.g. '1024x1024', '1536x1024', 'auto'
     """
@@ -416,19 +415,42 @@ async def generate_image_stream(
 
     image_paths = product_paths if product_paths else None
 
-    # Generate images (supports multiple models in parallel)
+    # Generate images
     if image_configs:
         count = min(max(1, int(n or 1)), MAX_IMAGES_PER_REQUEST)
 
-        model_names = [c.get("config_name", c["model_name"]) for c in image_configs]
-        yield {"step": "generating", "message": f"正在用 {len(image_configs)} 个模型并行生成 {count} 张独立图片: {', '.join(model_names)}"}
+        # When more than one image is requested, use the chat model to expand the
+        # single description into N distinct, complementary prompts (分镜).
+        # This ensures images form a coherent SET (KV主图/卖点/细节/场景) with the
+        # SAME product identity locked across all sub-prompts.
+        if count > 1 and text_config:
+            yield {"step": "expanding", "message": f"正在用文字模型 {text_config.get('config_name', text_config['model_name'])} 拆解为 {count} 个分镜提示词…"}
+            prompts = await expand_prompts(prompt, count, text_config, has_reference=bool(image_paths))
+            if len({p for p in prompts}) <= 1:
+                model_label = text_config.get("config_name", text_config["model_name"])
+                warn = (
+                    f"⚠ 文字模型 {model_label} 拆解失败（可能是 API Key / 接口地址无效），"
+                    f"已回退为用同一描述生成 {count} 张，关联性可能较弱。请检查模型配置。"
+                )
+                result["optimized_prompt"] = warn
+                yield {"step": "expand_failed", "message": warn, "optimized_prompt": warn}
+        else:
+            prompts = [prompt] * count
 
-        # Run all models in parallel, each making ONE call with n=count
-        # This ensures images from the same model have strong consistency
-        tasks = [_generate_one(prompt, cfg, image_paths, n=count, quality=quality, size=size) for cfg in image_configs]
-        nested_results = await asyncio.gather(*tasks)
-        # Flatten: each model may return multiple images
-        image_results = [r for model_results in nested_results for r in model_results]
+        # Surface the per-image prompts so the user can see what was generated.
+        if len({p for p in prompts}) > 1:
+            result["optimized_prompt"] = "\n".join(f"{i+1}. {p}" for i, p in enumerate(prompts))
+            yield {"step": "prompts_ready", "message": "分镜提示词已生成", "optimized_prompt": result["optimized_prompt"]}
+
+        model_names = [c.get("config_name", c["model_name"]) for c in image_configs]
+        yield {"step": "generating", "message": f"正在用 {len(image_configs)} 个模型顺序生成 {count} 张图片: {', '.join(model_names)}"}
+
+        # Run each model sequentially (not parallel) to avoid overwhelming relay API
+        # Each model generates count images sequentially (one at a time)
+        image_results = []
+        for cfg in image_configs:
+            model_results = await _generate_one(prompts, cfg, image_paths, quality=quality, size=size)
+            image_results.extend(model_results)
         result["image_results"] = image_results
 
         # Set first successful URL for backward compat
