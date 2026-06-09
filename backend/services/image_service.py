@@ -61,7 +61,13 @@ def _get_image_mime(image_path: str) -> str:
 
 
 
-def _encode_image_or_url(path: str, max_size: int = 1024) -> str:
+# Max pixel size for reference images. Smaller = smaller payload = fewer disconnects.
+# 512px is usually sufficient for gpt-image-2 to understand the product.
+REF_IMAGE_MAX_SIZE = 512
+REF_IMAGE_QUALITY = 70  # JPEG quality (0-100)
+
+
+def _encode_image_or_url(path: str, max_size: int = REF_IMAGE_MAX_SIZE) -> str:
     """Encode local file as data URL or return remote URL as-is.
     Local images are resized to max_size pixels on longest side to reduce payload."""
     if path.startswith("http"):
@@ -85,7 +91,7 @@ def _encode_image_or_url(path: str, max_size: int = 1024) -> str:
             img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
             logger.info(f"[ImageAPI] Resized {path} from {w}x{h} to {img.size}")
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
+        img.save(buf, format="JPEG", quality=REF_IMAGE_QUALITY)
         img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
         return f"data:image/jpeg;base64,{img_b64}"
     except ImportError:
@@ -250,7 +256,10 @@ async def call_image_api(
     # Only add single-image hint when n=1 to prevent collages
     if n == 1 and single_image_hint and SINGLE_IMAGE_HINT.strip() not in prompt:
         final_prompt = f"{prompt}{SINGLE_IMAGE_HINT}"
-    body = {"model": model_name, "prompt": final_prompt, "n": n, "size": size}
+    body = {"model": model_name, "prompt": final_prompt, "n": n}
+    # Only include size if explicitly specified (relay APIs may not need it)
+    if size and size != "auto":
+        body["size"] = size
     # gpt-image-2 quality parameter
     if quality and quality != "auto":
         body["quality"] = quality
@@ -268,7 +277,7 @@ async def call_image_api(
     body_size = len(json.dumps(body, ensure_ascii=False))
     prompt_preview = final_prompt[:200].replace("\n", " ")
     logger.info(
-        f"[ImageAPI][{req_id}] -> POST {url} | model={model_name} size={size} n={n} "
+        f"[ImageAPI][{req_id}] -> POST {url} | model={model_name} size={body.get('size', 'auto')} n={n} "
         f"img2img={bool(reference_image_paths)} body_size={body_size} prompt='{prompt_preview}'"
     )
 
@@ -356,16 +365,13 @@ async def _generate_one(
         f"(same prompt) quality={quality} size={size}"
     )
 
-    # Resolve size: 'auto' means let API decide (don't send size param)
-    effective_size = size if size and size != "auto" else "1024x1024"
-
     async def _single(idx: int):
         urls = await call_image_api(
             prompt=prompt,
             api_key=cfg["api_key"],
             base_url=cfg["base_url"],
             model_name=cfg["model_name"],
-            size=effective_size,
+            size=size,
             reference_image_paths=image_paths if image_paths else None,
             quality=quality,
             n=1,
