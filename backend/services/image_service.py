@@ -230,25 +230,27 @@ async def call_image_api(
     reference_image_paths: Optional[List[str]] = None,
     single_image_hint: bool = True,
     quality: str = "auto",
-) -> str:
-    """Call OpenAI-compatible image generation API. Returns image URL(s).
+    n: int = 1,
+) -> List[str]:
+    """Call OpenAI-compatible image generation API. Returns list of image URLs.
     Supports optional reference images for image-to-image generation.
 
-    Always request a single image per call (n=1). Relay/proxy image models are
-    chat-style backends that ignore n>1 and instead return ONE collage/nine-grid
-    image; callers that want multiple images should issue multiple calls.
+    When n>1, the API generates multiple related images in a single call,
+    ensuring strong consistency between images (same style, same subject).
 
     gpt-image-2 parameters:
     - quality: 'low' | 'medium' | 'high' | 'auto' (default 'auto')
     - size: supports flexible sizes like '1024x1024', '1536x1024', '1024x1536', 'auto'
+    - n: number of images to generate in one call (1-10)
     """
     req_id = uuid.uuid4().hex[:8]
     url = f"{base_url.rstrip('/')}/images/generations"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     final_prompt = prompt
-    if single_image_hint and SINGLE_IMAGE_HINT.strip() not in prompt:
+    # Only add single-image hint when n=1 to prevent collages
+    if n == 1 and single_image_hint and SINGLE_IMAGE_HINT.strip() not in prompt:
         final_prompt = f"{prompt}{SINGLE_IMAGE_HINT}"
-    body = {"model": model_name, "prompt": final_prompt, "n": 1, "size": size}
+    body = {"model": model_name, "prompt": final_prompt, "n": n, "size": size}
     # gpt-image-2 quality parameter
     if quality and quality != "auto":
         body["quality"] = quality
@@ -266,7 +268,7 @@ async def call_image_api(
     body_size = len(json.dumps(body, ensure_ascii=False))
     prompt_preview = final_prompt[:200].replace("\n", " ")
     logger.info(
-        f"[ImageAPI][{req_id}] -> POST {url} | model={model_name} size={size} n=1 "
+        f"[ImageAPI][{req_id}] -> POST {url} | model={model_name} size={size} n={n} "
         f"img2img={bool(reference_image_paths)} body_size={body_size} prompt='{prompt_preview}'"
     )
 
@@ -310,9 +312,9 @@ async def call_image_api(
 
     def _resolve_image(img_data: dict) -> str:
         """Return URL; if b64_json, save to file and return file path."""
-        url = img_data.get("url") or img_data.get("image_url")
-        if url:
-            return url
+        url_val = img_data.get("url") or img_data.get("image_url")
+        if url_val:
+            return url_val
         b64 = img_data.get("b64_json")
         if b64:
             # Save base64 data as file
@@ -325,64 +327,54 @@ async def call_image_api(
             return f"/uploads/{filename}"
         raise ValueError(f"图片生成 API 未返回 url 或 b64_json, 响应: {img_data}")
 
-    # Each call requests a single image, so return the first one.
-    result_url = _resolve_image(images[0])
-    logger.info(f"[ImageAPI][{req_id}] done -> image={result_url}")
-    return result_url
+    # Resolve all returned images
+    result_urls = [_resolve_image(img) for img in images]
+    logger.info(f"[ImageAPI][{req_id}] done -> {len(result_urls)} image(s)")
+    return result_urls
 
 
 async def _generate_one(
-    prompts: List[str],
+    prompt: str,
     cfg: dict,
     image_paths: Optional[List[str]],
+    n: int = 1,
     quality: str = "auto",
     size: str = "auto",
 ) -> list:
-    """Generate one image per prompt with a single model, return list of result dicts.
+    """Generate n images with a single model in ONE API call, return list of result dicts.
 
-    Issues len(prompts) independent single-image requests (concurrently) instead of
-    one request with n>1. Relay/proxy image models collapse an n>1 request into a
-    single collage/nine-grid image, so one request per image is what reliably yields
-    distinct standalone images. Each call uses its own (possibly distinct) prompt, so
-    selecting N images yields N images from N complementary prompts. The number of
-    prompts is clamped to MAX_IMAGES_PER_REQUEST."""
+    Uses n parameter to let the model generate multiple related images in one call,
+    ensuring strong consistency between images (same style, subject, etc.).
+    This is the correct approach for gpt-image-2 via relay APIs."""
     name = cfg.get("config_name", cfg["model_name"])
-    prompts = prompts[:MAX_IMAGES_PER_REQUEST] or [""]
-    count = len(prompts)
-    distinct = len({p for p in prompts})
+    count = min(max(1, n), MAX_IMAGES_PER_REQUEST)
     logger.info(
-        f"[ImageAPI] _generate_one: model={name} -> issuing {count} independent n=1 call(s) "
-        f"({distinct} distinct prompt(s)) quality={quality} size={size}"
+        f"[ImageAPI] _generate_one: model={name} -> single call with n={count} "
+        f"quality={quality} size={size}"
     )
 
     # Resolve size: 'auto' means let API decide (don't send size param)
     effective_size = size if size and size != "auto" else "1024x1024"
 
-    async def _single(idx: int, p: str):
-        url = await call_image_api(
-            prompt=p,
+    try:
+        urls = await call_image_api(
+            prompt=prompt,
             api_key=cfg["api_key"],
             base_url=cfg["base_url"],
             model_name=cfg["model_name"],
             size=effective_size,
             reference_image_paths=image_paths if image_paths else None,
             quality=quality,
+            n=count,
         )
-        return {"model_name": name, "image_url": url, "error": None, "prompt": p, "index": idx}
-
-    results = await asyncio.gather(
-        *[_single(i, p) for i, p in enumerate(prompts)], return_exceptions=True
-    )
-    out = []
-    for i, r in enumerate(results):
-        if isinstance(r, Exception):
-            logger.error(f"[ImageAPI] _generate_one: model={name} image #{i} failed: {r}")
-            out.append({"model_name": name, "image_url": None, "error": str(r), "prompt": prompts[i], "index": i})
-        else:
-            out.append(r)
-    ok = sum(1 for o in out if o.get("image_url"))
-    logger.info(f"[ImageAPI] _generate_one done: model={name} {ok}/{count} image(s) succeeded")
-    return out
+        out = []
+        for i, url in enumerate(urls):
+            out.append({"model_name": name, "image_url": url, "error": None, "prompt": prompt, "index": i})
+        logger.info(f"[ImageAPI] _generate_one done: model={name} {len(out)}/{count} image(s) succeeded")
+        return out
+    except Exception as e:
+        logger.error(f"[ImageAPI] _generate_one: model={name} failed: {e}")
+        return [{"model_name": name, "image_url": None, "error": str(e), "prompt": prompt, "index": 0}]
 
 
 async def generate_image_stream(
@@ -397,9 +389,10 @@ async def generate_image_stream(
     """
     Async generator that yields status dicts during image generation.
     image_configs: list of {"api_key", "base_url", "model_name", "config_name"} for image generation
-    text_config: optional {"api_key", "base_url", "model_name", "config_name"} chat model used,
-                 when n>1, to expand the description into n distinct complementary prompts.
+    text_config: optional {"api_key", "base_url", "model_name", "config_name"} chat model used
+                 (currently unused - kept for future prompt optimization features)
     product_paths: list of product image paths (for img2img, supports multiple reference images)
+    n: number of images to generate per model in ONE API call (ensures consistency)
     quality: 'low' | 'medium' | 'high' | 'auto' (gpt-image-2 quality setting)
     size: image size e.g. '1024x1024', '1536x1024', 'auto'
     """
@@ -410,36 +403,13 @@ async def generate_image_stream(
     # Generate images (supports multiple models in parallel)
     if image_configs:
         count = min(max(1, int(n or 1)), MAX_IMAGES_PER_REQUEST)
-        # When more than one image is requested, use the chat model to expand the
-        # single description into N distinct, complementary prompts (one per image).
-        if count > 1 and text_config:
-            yield {"step": "expanding", "message": f"正在用文字模型 {text_config.get('config_name', text_config['model_name'])} 拆解为 {count} 个章节提示词…"}
-            prompts = await expand_prompts(prompt, count, text_config, has_reference=bool(image_paths))
-            # expand_prompts falls back to [prompt]*count on any failure (bad key,
-            # network, unparseable output). Detect that and warn the user instead of
-            # silently degrading into N identical full-page images.
-            if len({p for p in prompts}) <= 1:
-                model_label = text_config.get("config_name", text_config["model_name"])
-                warn = (
-                    f"⚠ 文字模型 {model_label} 拆解失败（可能是 API Key / 接口地址无效），"
-                    f"已回退为用同一描述生成 {count} 张，内容可能相近。请检查模型配置。"
-                )
-                # Persist on the task so the warning survives reload, not just a
-                # transient progress message the user might miss.
-                result["optimized_prompt"] = warn
-                yield {"step": "expand_failed", "message": warn, "optimized_prompt": warn}
-        else:
-            prompts = [prompt] * count
-        # Surface the per-image prompts so the user can see/trace what was generated.
-        if len({p for p in prompts}) > 1:
-            result["optimized_prompt"] = "\n".join(f"{i+1}. {p}" for i, p in enumerate(prompts))
-            yield {"step": "prompts_ready", "message": "提示词已生成", "optimized_prompt": result["optimized_prompt"]}
 
         model_names = [c.get("config_name", c["model_name"]) for c in image_configs]
-        yield {"step": "generating", "message": f"正在用 {len(image_configs)} 个模型并行生成图片: {', '.join(model_names)}"}
+        yield {"step": "generating", "message": f"正在用 {len(image_configs)} 个模型生成 {count} 张图片 (单次调用 n={count}): {', '.join(model_names)}"}
 
-        # Run all models in parallel (pass product images for img2img)
-        tasks = [_generate_one(prompts, cfg, image_paths, quality=quality, size=size) for cfg in image_configs]
+        # Run all models in parallel, each making ONE call with n=count
+        # This ensures images from the same model have strong consistency
+        tasks = [_generate_one(prompt, cfg, image_paths, n=count, quality=quality, size=size) for cfg in image_configs]
         nested_results = await asyncio.gather(*tasks)
         # Flatten: each model may return multiple images
         image_results = [r for model_results in nested_results for r in model_results]
