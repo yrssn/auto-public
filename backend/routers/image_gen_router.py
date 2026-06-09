@@ -139,13 +139,20 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
             data = json.loads(raw)
 
             prompt = data.get("prompt", "").strip()
+            # Support both single product_image (legacy) and multiple product_images
+            product_images = data.get("product_images") or []
             product_image = data.get("product_image")
-            has_images = bool(product_image)
+            if not product_images and product_image:
+                product_images = [product_image]
+            has_images = bool(product_images)
             # Support both old single id and new multi-select ids
             model_config_ids = data.get("model_config_ids") or []
             if not model_config_ids and data.get("model_config_id"):
                 model_config_ids = [data["model_config_id"]]
             n_images = data.get("n", 1)
+            # gpt-image-2 parameters
+            quality = data.get("quality", "auto")
+            size = data.get("size", "auto")
 
             if not prompt and not has_images:
                 await websocket.send_json({"type": "error", "message": "请上传产品图片或输入描述"})
@@ -191,15 +198,16 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                 conv.title = prompt[:50]
                 db.commit()
 
-            # Create task (store product image)
+            # Create task (store product images)
             uploaded_images_json = json.dumps({
-                "product_image": product_image,
+                "product_image": product_images[0] if product_images else None,
+                "product_images": product_images,
             }) if has_images else None
             task = ImageTask(
                 conversation_id=conv_id,
                 role="user",
                 prompt=prompt,
-                uploaded_image=product_image,
+                uploaded_image=product_images[0] if product_images else None,
                 uploaded_images_json=uploaded_images_json,
                 status="generating",
                 owner_id=user_id,
@@ -215,14 +223,14 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                 "task": _task_dict(task),
             })
 
-            # Resolve product image path on disk
-            product_path = None
-            if product_image:
-                fname = product_image.split("/")[-1]
-                product_path = os.path.join(UPLOAD_DIR, fname)
+            # Resolve product image paths on disk (support multiple)
+            product_paths = []
+            for img_path in product_images:
+                fname = img_path.split("/")[-1]
+                product_paths.append(os.path.join(UPLOAD_DIR, fname))
 
-            # Fallback to previous task if no current image
-            if not product_path:
+            # Fallback to previous task if no current images
+            if not product_paths:
                 prev_task = (
                     db.query(ImageTask)
                     .filter(ImageTask.conversation_id == conv_id, ImageTask.id < task_id)
@@ -233,14 +241,19 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
                     if prev_task.uploaded_images_json:
                         try:
                             prev_data = json.loads(prev_task.uploaded_images_json)
-                            if isinstance(prev_data, dict) and prev_data.get("product_image"):
-                                fname = prev_data["product_image"].split("/")[-1]
-                                product_path = os.path.join(UPLOAD_DIR, fname)
+                            if isinstance(prev_data, dict):
+                                # Try new multi-image field first
+                                prev_imgs = prev_data.get("product_images") or []
+                                if not prev_imgs and prev_data.get("product_image"):
+                                    prev_imgs = [prev_data["product_image"]]
+                                for p in prev_imgs:
+                                    fname = p.split("/")[-1]
+                                    product_paths.append(os.path.join(UPLOAD_DIR, fname))
                         except (json.JSONDecodeError, TypeError):
                             pass
                     elif prev_task.uploaded_image:
                         fname = prev_task.uploaded_image.split("/")[-1]
-                        product_path = os.path.join(UPLOAD_DIR, fname)
+                        product_paths.append(os.path.join(UPLOAD_DIR, fname))
 
             # Release db session BEFORE long-running generation to prevent MySQL timeout
             db.close()
@@ -251,10 +264,12 @@ async def conversation_ws(websocket: WebSocket, conv_id: int):
             try:
                 async for update in generate_image_stream(
                     prompt=prompt,
-                    product_path=product_path,
+                    product_paths=product_paths if product_paths else None,
                     image_configs=image_cfgs if image_cfgs else None,
                     n=n_images,
                     text_config=text_cfg,
+                    quality=quality,
+                    size=size,
                 ):
                     # Try to send progress via WS (ignore if disconnected)
                     try:

@@ -42,8 +42,22 @@
               <div class="result-input">
                 <div class="result-label">输入</div>
                 <p class="result-prompt">{{ task.prompt }}</p>
-                <!-- Product image -->
-                <div v-if="task.uploaded_images?.product_image" class="img-group">
+                <!-- Product images (support multiple) -->
+                <div v-if="task.uploaded_images?.product_images?.length" class="img-group">
+                  <span class="img-group-label">产品图 ({{ task.uploaded_images.product_images.length }} 张)</span>
+                  <div class="uploaded-images-row">
+                    <el-image
+                      v-for="(img, i) in task.uploaded_images.product_images"
+                      :key="i"
+                      :src="img"
+                      :preview-src-list="task.uploaded_images.product_images"
+                      :initial-index="i"
+                      class="result-thumb"
+                      fit="contain"
+                    />
+                  </div>
+                </div>
+                <div v-else-if="task.uploaded_images?.product_image" class="img-group">
                   <span class="img-group-label">产品图</span>
                   <el-image
                     :src="task.uploaded_images.product_image"
@@ -114,12 +128,12 @@
         <!-- Input Bar -->
         <div class="input-bar">
           <div class="input-bar-top">
-            <!-- 产品图 -->
+            <!-- 产品图（支持多张） -->
             <div class="upload-group">
-              <div class="upload-label">产品图</div>
+              <div class="upload-label">产品图（可多张）</div>
               <el-upload
                 :auto-upload="false"
-                :limit="1"
+                :limit="5"
                 accept="image/*"
                 :on-change="handleProductChange"
                 :on-remove="handleProductRemove"
@@ -148,6 +162,18 @@
                   <el-option :value="2" label="2张" />
                   <el-option :value="4" label="4张" />
                 </el-select>
+                <el-select v-model="form.quality" size="small" style="width: 100px" placeholder="质量">
+                  <el-option value="auto" label="自动" />
+                  <el-option value="low" label="低" />
+                  <el-option value="medium" label="中" />
+                  <el-option value="high" label="高" />
+                </el-select>
+                <el-select v-model="form.size" size="small" style="width: 130px" placeholder="尺寸">
+                  <el-option value="auto" label="自动" />
+                  <el-option value="1024x1024" label="1024×1024" />
+                  <el-option value="1536x1024" label="1536×1024" />
+                  <el-option value="1024x1536" label="1024×1536" />
+                </el-select>
                 <div class="ws-status">
                   <span class="ws-dot" :class="wsConnected ? 'on' : 'off'"></span>
                   {{ wsConnected ? '已连接' : '未连接' }}
@@ -175,7 +201,7 @@ import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { conversationAPI, modelConfigAPI, getConvWsUrl } from '../api'
 import { ElMessage } from 'element-plus'
 
-const form = ref({ prompt: '', model_config_ids: [], optimize_prompt: false, n: 1 })
+const form = ref({ prompt: '', model_config_ids: [], optimize_prompt: false, n: 1, quality: 'auto', size: 'auto' })
 const conversations = ref([])
 const activeConvId = ref(null)
 const tasks = ref([])
@@ -183,9 +209,9 @@ const generating = ref(false)
 const modelConfigs = ref([])
 const imageModels = ref([])
 const resultsRef = ref(null)
-// Product image (subject to insert)
+// Product images (support multiple)
 const productFileList = ref([])
-const productFile = ref(null)
+const productFiles = ref([])
 const progressMsg = ref('')
 const wsConnected = ref(false)
 
@@ -208,13 +234,12 @@ function statusType(s) { return statusMap[s]?.type || 'info' }
 function statusLabel(s) { return statusMap[s]?.label || s }
 function fmtTime(t) { return t ? new Date(t).toLocaleString('zh-CN') : '' }
 
-// Product image handlers
-function handleProductChange(file) {
-  productFile.value = file.raw
+// Product image handlers (multiple)
+function handleProductChange(file, fileList) {
+  productFiles.value = fileList.map(f => f.raw || f)
 }
-function handleProductRemove() {
-  productFile.value = null
-  productFileList.value = []
+function handleProductRemove(file, fileList) {
+  productFiles.value = fileList.map(f => f.raw || f)
 }
 
 // ---- WS Management ----
@@ -400,7 +425,7 @@ async function handleDeleteConv(id) {
 }
 
 async function handleGenerate() {
-  const hasProduct = !!productFile.value
+  const hasProduct = productFiles.value.length > 0
   const hasPrompt = form.value.prompt.trim()
 
   if (!hasPrompt && !hasProduct) {
@@ -415,13 +440,15 @@ async function handleGenerate() {
   generating.value = true
   progressMsg.value = '准备中...'
 
-  // Upload product image
-  let productPath = null
+  // Upload product images (support multiple)
+  let productPaths = []
   if (hasProduct) {
     try {
-      progressMsg.value = '上传产品图...'
-      const res = await conversationAPI.upload(productFile.value)
-      productPath = res.data.path
+      progressMsg.value = `上传产品图 (${productFiles.value.length} 张)...`
+      for (const file of productFiles.value) {
+        const res = await conversationAPI.upload(file)
+        productPaths.push(res.data.path)
+      }
     } catch {
       ElMessage.error('产品图上传失败')
       generating.value = false
@@ -430,17 +457,20 @@ async function handleGenerate() {
     }
   }
 
-  // Send via WS
+  // Send via WS (send both product_images array and legacy product_image)
   activeWs.send(JSON.stringify({
     prompt: form.value.prompt || '',
-    product_image: productPath,
+    product_image: productPaths.length > 0 ? productPaths[0] : null,
+    product_images: productPaths.length > 0 ? productPaths : null,
     model_config_ids: form.value.model_config_ids,
     optimize_prompt: false,
     n: form.value.n,
+    quality: form.value.quality,
+    size: form.value.size,
   }))
 
   form.value.prompt = ''
-  productFile.value = null
+  productFiles.value = []
   productFileList.value = []
 }
 

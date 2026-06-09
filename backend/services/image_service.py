@@ -229,13 +229,19 @@ async def call_image_api(
     size: str = "1024x1024",
     reference_image_paths: Optional[List[str]] = None,
     single_image_hint: bool = True,
+    quality: str = "auto",
 ) -> str:
     """Call OpenAI-compatible image generation API. Returns image URL(s).
     Supports optional reference images for image-to-image generation.
 
     Always request a single image per call (n=1). Relay/proxy image models are
     chat-style backends that ignore n>1 and instead return ONE collage/nine-grid
-    image; callers that want multiple images should issue multiple calls."""
+    image; callers that want multiple images should issue multiple calls.
+
+    gpt-image-2 parameters:
+    - quality: 'low' | 'medium' | 'high' | 'auto' (default 'auto')
+    - size: supports flexible sizes like '1024x1024', '1536x1024', '1024x1536', 'auto'
+    """
     req_id = uuid.uuid4().hex[:8]
     url = f"{base_url.rstrip('/')}/images/generations"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -243,6 +249,9 @@ async def call_image_api(
     if single_image_hint and SINGLE_IMAGE_HINT.strip() not in prompt:
         final_prompt = f"{prompt}{SINGLE_IMAGE_HINT}"
     body = {"model": model_name, "prompt": final_prompt, "n": 1, "size": size}
+    # gpt-image-2 quality parameter
+    if quality and quality != "auto":
+        body["quality"] = quality
     # Note: do NOT send response_format - many middleman APIs don't support it and may hang
 
     # Include reference images for img2img if available
@@ -322,7 +331,13 @@ async def call_image_api(
     return result_url
 
 
-async def _generate_one(prompts: List[str], cfg: dict, image_paths: Optional[List[str]]) -> list:
+async def _generate_one(
+    prompts: List[str],
+    cfg: dict,
+    image_paths: Optional[List[str]],
+    quality: str = "auto",
+    size: str = "auto",
+) -> list:
     """Generate one image per prompt with a single model, return list of result dicts.
 
     Issues len(prompts) independent single-image requests (concurrently) instead of
@@ -337,8 +352,11 @@ async def _generate_one(prompts: List[str], cfg: dict, image_paths: Optional[Lis
     distinct = len({p for p in prompts})
     logger.info(
         f"[ImageAPI] _generate_one: model={name} -> issuing {count} independent n=1 call(s) "
-        f"({distinct} distinct prompt(s))"
+        f"({distinct} distinct prompt(s)) quality={quality} size={size}"
     )
+
+    # Resolve size: 'auto' means let API decide (don't send size param)
+    effective_size = size if size and size != "auto" else "1024x1024"
 
     async def _single(idx: int, p: str):
         url = await call_image_api(
@@ -346,7 +364,9 @@ async def _generate_one(prompts: List[str], cfg: dict, image_paths: Optional[Lis
             api_key=cfg["api_key"],
             base_url=cfg["base_url"],
             model_name=cfg["model_name"],
+            size=effective_size,
             reference_image_paths=image_paths if image_paths else None,
+            quality=quality,
         )
         return {"model_name": name, "image_url": url, "error": None, "prompt": p, "index": idx}
 
@@ -367,21 +387,25 @@ async def _generate_one(prompts: List[str], cfg: dict, image_paths: Optional[Lis
 
 async def generate_image_stream(
     prompt: str,
-    product_path: Optional[str],
+    product_paths: Optional[List[str]] = None,
     image_configs: Optional[List[dict]] = None,
     n: int = 1,
     text_config: Optional[dict] = None,
+    quality: str = "auto",
+    size: str = "auto",
 ):
     """
     Async generator that yields status dicts during image generation.
     image_configs: list of {"api_key", "base_url", "model_name", "config_name"} for image generation
     text_config: optional {"api_key", "base_url", "model_name", "config_name"} chat model used,
                  when n>1, to expand the description into n distinct complementary prompts.
-    product_path: product image path (for img2img)
+    product_paths: list of product image paths (for img2img, supports multiple reference images)
+    quality: 'low' | 'medium' | 'high' | 'auto' (gpt-image-2 quality setting)
+    size: image size e.g. '1024x1024', '1536x1024', 'auto'
     """
     result = {"optimized_prompt": None, "image_url": None, "image_results": []}
 
-    image_paths = [product_path] if product_path else None
+    image_paths = product_paths if product_paths else None
 
     # Generate images (supports multiple models in parallel)
     if image_configs:
@@ -414,8 +438,8 @@ async def generate_image_stream(
         model_names = [c.get("config_name", c["model_name"]) for c in image_configs]
         yield {"step": "generating", "message": f"正在用 {len(image_configs)} 个模型并行生成图片: {', '.join(model_names)}"}
 
-        # Run all models in parallel (pass product image for img2img)
-        tasks = [_generate_one(prompts, cfg, image_paths) for cfg in image_configs]
+        # Run all models in parallel (pass product images for img2img)
+        tasks = [_generate_one(prompts, cfg, image_paths, quality=quality, size=size) for cfg in image_configs]
         nested_results = await asyncio.gather(*tasks)
         # Flatten: each model may return multiple images
         image_results = [r for model_results in nested_results for r in model_results]
