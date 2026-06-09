@@ -157,23 +157,7 @@
                 <el-select v-model="form.model_config_ids" placeholder="选择图片模型（可多选）" multiple collapse-tags collapse-tags-tooltip size="small" style="min-width: 200px; max-width: 360px">
                   <el-option v-for="c in imageModels" :key="c.id" :label="c.name" :value="c.id" />
                 </el-select>
-                <el-select v-model="form.n" size="small" style="width: 90px">
-                  <el-option :value="1" label="1张" />
-                  <el-option :value="2" label="2张" />
-                  <el-option :value="4" label="4张" />
-                </el-select>
-                <el-select v-model="form.quality" size="small" style="width: 100px" placeholder="质量">
-                  <el-option value="auto" label="自动" />
-                  <el-option value="low" label="低" />
-                  <el-option value="medium" label="中" />
-                  <el-option value="high" label="高" />
-                </el-select>
-                <el-select v-model="form.size" size="small" style="width: 130px" placeholder="尺寸">
-                  <el-option value="auto" label="自动" />
-                  <el-option value="1024x1024" label="1024×1024" />
-                  <el-option value="1536x1024" label="1536×1024" />
-                  <el-option value="1024x1536" label="1024×1536" />
-                </el-select>
+
                 <div class="ws-status">
                   <span class="ws-dot" :class="wsConnected ? 'on' : 'off'"></span>
                   {{ wsConnected ? '已连接' : '未连接' }}
@@ -201,7 +185,7 @@ import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { conversationAPI, modelConfigAPI, getConvWsUrl } from '../api'
 import { ElMessage } from 'element-plus'
 
-const form = ref({ prompt: '', model_config_ids: [], optimize_prompt: false, n: 1, quality: 'auto', size: 'auto' })
+const form = ref({ prompt: '', model_config_ids: [], optimize_prompt: false, n: 4 })
 const conversations = ref([])
 const activeConvId = ref(null)
 const tasks = ref([])
@@ -465,8 +449,6 @@ async function handleGenerate() {
     model_config_ids: form.value.model_config_ids,
     optimize_prompt: false,
     n: form.value.n,
-    quality: form.value.quality,
-    size: form.value.size,
   }))
 
   form.value.prompt = ''
