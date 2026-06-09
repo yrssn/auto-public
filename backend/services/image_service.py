@@ -341,22 +341,25 @@ async def _generate_one(
     quality: str = "auto",
     size: str = "auto",
 ) -> list:
-    """Generate n images with a single model in ONE API call, return list of result dicts.
+    """Generate n images with a single model, return list of result dicts.
 
-    Uses n parameter to let the model generate multiple related images in one call,
-    ensuring strong consistency between images (same style, subject, etc.).
-    This is the correct approach for gpt-image-2 via relay APIs."""
+    Issues n independent n=1 API calls concurrently, all using the SAME prompt.
+    This ensures each image is a standalone picture (not a collage/composite),
+    while using the same prompt maintains style/subject consistency across images.
+
+    Relay APIs often merge n>1 into a single composite image, so separate n=1
+    calls are the reliable way to get truly separate images."""
     name = cfg.get("config_name", cfg["model_name"])
     count = min(max(1, n), MAX_IMAGES_PER_REQUEST)
     logger.info(
-        f"[ImageAPI] _generate_one: model={name} -> single call with n={count} "
-        f"quality={quality} size={size}"
+        f"[ImageAPI] _generate_one: model={name} -> issuing {count} independent n=1 call(s) "
+        f"(same prompt) quality={quality} size={size}"
     )
 
     # Resolve size: 'auto' means let API decide (don't send size param)
     effective_size = size if size and size != "auto" else "1024x1024"
 
-    try:
+    async def _single(idx: int):
         urls = await call_image_api(
             prompt=prompt,
             api_key=cfg["api_key"],
@@ -365,16 +368,23 @@ async def _generate_one(
             size=effective_size,
             reference_image_paths=image_paths if image_paths else None,
             quality=quality,
-            n=count,
+            n=1,
         )
-        out = []
-        for i, url in enumerate(urls):
-            out.append({"model_name": name, "image_url": url, "error": None, "prompt": prompt, "index": i})
-        logger.info(f"[ImageAPI] _generate_one done: model={name} {len(out)}/{count} image(s) succeeded")
-        return out
-    except Exception as e:
-        logger.error(f"[ImageAPI] _generate_one: model={name} failed: {e}")
-        return [{"model_name": name, "image_url": None, "error": str(e), "prompt": prompt, "index": 0}]
+        return {"model_name": name, "image_url": urls[0] if urls else None, "error": None, "prompt": prompt, "index": idx}
+
+    results = await asyncio.gather(
+        *[_single(i) for i in range(count)], return_exceptions=True
+    )
+    out = []
+    for i, r in enumerate(results):
+        if isinstance(r, Exception):
+            logger.error(f"[ImageAPI] _generate_one: model={name} image #{i} failed: {r}")
+            out.append({"model_name": name, "image_url": None, "error": str(r), "prompt": prompt, "index": i})
+        else:
+            out.append(r)
+    ok = sum(1 for o in out if o.get("image_url"))
+    logger.info(f"[ImageAPI] _generate_one done: model={name} {ok}/{count} image(s) succeeded")
+    return out
 
 
 async def generate_image_stream(
@@ -405,7 +415,7 @@ async def generate_image_stream(
         count = min(max(1, int(n or 1)), MAX_IMAGES_PER_REQUEST)
 
         model_names = [c.get("config_name", c["model_name"]) for c in image_configs]
-        yield {"step": "generating", "message": f"正在用 {len(image_configs)} 个模型生成 {count} 张图片 (单次调用 n={count}): {', '.join(model_names)}"}
+        yield {"step": "generating", "message": f"正在用 {len(image_configs)} 个模型并行生成 {count} 张独立图片: {', '.join(model_names)}"}
 
         # Run all models in parallel, each making ONE call with n=count
         # This ensures images from the same model have strong consistency
