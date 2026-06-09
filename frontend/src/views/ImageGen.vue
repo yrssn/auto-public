@@ -157,7 +157,11 @@
                 <el-select v-model="form.model_config_ids" placeholder="选择图片模型（可多选）" multiple collapse-tags collapse-tags-tooltip size="small" style="min-width: 200px; max-width: 360px">
                   <el-option v-for="c in imageModels" :key="c.id" :label="c.name" :value="c.id" />
                 </el-select>
-
+                <el-select v-model="form.n" size="small" style="width: 90px">
+                  <el-option :value="1" label="1张" />
+                  <el-option :value="2" label="2张" />
+                  <el-option :value="4" label="4张" />
+                </el-select>
                 <div class="ws-status">
                   <span class="ws-dot" :class="wsConnected ? 'on' : 'off'"></span>
                   {{ wsConnected ? '已连接' : '未连接' }}
@@ -185,7 +189,7 @@ import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { conversationAPI, modelConfigAPI, getConvWsUrl } from '../api'
 import { ElMessage } from 'element-plus'
 
-const form = ref({ prompt: '', model_config_ids: [], optimize_prompt: false, n: 4 })
+const form = ref({ prompt: '', model_config_ids: [], optimize_prompt: false, n: 1 })
 const conversations = ref([])
 const activeConvId = ref(null)
 const tasks = ref([])
